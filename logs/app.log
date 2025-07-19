@@ -1,0 +1,235 @@
+{"level":"info","message":"MTProto client started","timestamp":"2025-07-18T14:45:31.821Z"}
+{"level":"info","message":"MTProto client initialized","timestamp":"2025-07-18T14:45:31.822Z"}
+{"level":"info","message":"Received /start","timestamp":"2025-07-18T14:45:48.488Z","user":"5148047965","username":"seyedaliij"}
+{"keyword":"تاسیان","level":"info","message":"Search command invoked","timestamp":"2025-07-18T14:45:53.249Z","user":"5148047965"}
+{"keyword":"تاسیان","level":"info","message":"Acknowledging search","timestamp":"2025-07-18T14:45:53.252Z","user":"5148047965"}
+{"count":8,"keyword":"تاسیان","level":"info","message":"Telegram global search complete","timestamp":"2025-07-18T14:45:53.976Z"}
+{"count":10,"keyword":"تاسیان","level":"info","message":"Web search complete","timestamp":"2025-07-18T14:45:54.384Z"}
+{"keyword":"تاسیان","level":"info","message":"Search completed","tgCount":8,"timestamp":"2025-07-18T14:45:54.385Z","totalResults":18,"user":"5148047965","webCount":10}
+{"level":"info","message":"Discovery client started via SOCKS5","timestamp":"2025-07-18T15:02:13.061Z"}
+{"level":"info","message":"Searching global for seed","q":"a","timestamp":"2025-07-18T15:02:13.063Z"}
+{"level":"info","message":"Searching global for seed","q":"b","timestamp":"2025-07-18T15:02:14.447Z"}
+{"level":"info","message":"Searching global for seed","q":"c","timestamp":"2025-07-18T15:02:15.729Z"}
+{"level":"info","message":"Searching global for seed","q":"d","timestamp":"2025-07-18T15:02:17.072Z"}
+{"level":"info","message":"Searching global for seed","q":"e","timestamp":"2025-07-18T15:02:18.278Z"}
+{"level":"info","message":"Searching global for seed","q":"f","timestamp":"2025-07-18T15:02:19.618Z"}
+{"level":"info","message":"Searching global for seed","q":"g","timestamp":"2025-07-18T15:02:20.996Z"}
+{"level":"info","message":"Searching global for seed","q":"h","timestamp":"2025-07-18T15:02:22.525Z"}
+{"level":"info","message":"Searching global for seed","q":"i","timestamp":"2025-07-18T15:02:23.974Z"}
+{"level":"info","message":"Searching global for seed","q":"j","timestamp":"2025-07-18T15:02:25.195Z"}
+{"level":"info","message":"Searching global for seed","q":"k","timestamp":"2025-07-18T15:02:26.444Z"}
+{"level":"info","message":"Searching global for seed","q":"l","timestamp":"2025-07-18T15:02:27.682Z"}
+{"level":"info","message":"Searching global for seed","q":"m","timestamp":"2025-07-18T15:02:28.953Z"}
+{"level":"info","message":"Searching global for seed","q":"n","timestamp":"2025-07-18T15:02:30.190Z"}
+{"level":"info","message":"Searching global for seed","q":"o","timestamp":"2025-07-18T15:02:31.422Z"}
+{"level":"info","message":"Searching global for seed","q":"p","timestamp":"2025-07-18T15:02:32.707Z"}
+{"level":"info","message":"Searching global for seed","q":"q","timestamp":"2025-07-18T15:02:33.942Z"}
+{"level":"info","message":"Searching global for seed","q":"r","timestamp":"2025-07-18T15:02:35.186Z"}
+{"level":"info","message":"Searching global for seed","q":"s","timestamp":"2025-07-18T15:02:36.415Z"}
+{"level":"info","message":"Searching global for seed","q":"t","timestamp":"2025-07-18T15:02:37.635Z"}
+{"level":"info","message":"Searching global for seed","q":"u","timestamp":"2025-07-18T15:02:38.869Z"}
+{"level":"info","message":"Searching global for seed","q":"v","timestamp":"2025-07-18T15:02:40.141Z"}
+{"level":"info","message":"Searching global for seed","q":"w","timestamp":"2025-07-18T15:02:41.517Z"}
+{"level":"info","message":"Searching global for seed","q":"x","timestamp":"2025-07-18T15:02:42.783Z"}
+{"level":"info","message":"Searching global for seed","q":"y","timestamp":"2025-07-18T15:02:44.039Z"}
+{"level":"info","message":"Searching global for seed","q":"z","timestamp":"2025-07-18T15:02:45.303Z"}
+{"level":"info","message":"Searching global for seed","q":"0","timestamp":"2025-07-18T15:02:46.860Z"}
+{"level":"info","message":"Searching global for seed","q":"1","timestamp":"2025-07-18T15:02:48.020Z"}
+{"level":"info","message":"Searching global for seed","q":"2","timestamp":"2025-07-18T15:02:49.186Z"}
+{"level":"info","message":"Searching global for seed","q":"3","timestamp":"2025-07-18T15:02:50.423Z"}
+{"level":"info","message":"Searching global for seed","q":"4","timestamp":"2025-07-18T15:02:51.659Z"}
+{"level":"info","message":"Searching global for seed","q":"5","timestamp":"2025-07-18T15:02:52.892Z"}
+{"level":"info","message":"Searching global for seed","q":"6","timestamp":"2025-07-18T15:02:54.283Z"}
+{"level":"info","message":"Searching global for seed","q":"7","timestamp":"2025-07-18T15:02:55.978Z"}
+{"level":"info","message":"Searching global for seed","q":"8","timestamp":"2025-07-18T15:02:57.112Z"}
+{"level":"info","message":"Searching global for seed","q":"9","timestamp":"2025-07-18T15:02:58.333Z"}
+{"count":127,"level":"info","message":"Discovered channels saved","timestamp":"2025-07-18T15:02:59.557Z"}
+{"level":"info","message":"Discovery client started via SOCKS5","timestamp":"2025-07-18T15:03:43.304Z"}
+{"level":"info","message":"Searching global for seed","q":"a","timestamp":"2025-07-18T15:03:43.306Z"}
+{"level":"info","message":"Searching global for seed","q":"b","timestamp":"2025-07-18T15:03:44.597Z"}
+{"level":"info","message":"Searching global for seed","q":"c","timestamp":"2025-07-18T15:03:45.891Z"}
+{"level":"info","message":"Searching global for seed","q":"d","timestamp":"2025-07-18T15:03:47.226Z"}
+{"level":"info","message":"Searching global for seed","q":"e","timestamp":"2025-07-18T15:03:48.510Z"}
+{"level":"info","message":"Searching global for seed","q":"f","timestamp":"2025-07-18T15:03:49.764Z"}
+{"level":"info","message":"Searching global for seed","q":"g","timestamp":"2025-07-18T15:03:51.108Z"}
+{"level":"info","message":"Searching global for seed","q":"h","timestamp":"2025-07-18T15:03:52.377Z"}
+{"level":"info","message":"Searching global for seed","q":"i","timestamp":"2025-07-18T15:03:53.833Z"}
+{"level":"info","message":"Searching global for seed","q":"j","timestamp":"2025-07-18T15:03:55.120Z"}
+{"level":"info","message":"Searching global for seed","q":"k","timestamp":"2025-07-18T15:03:56.297Z"}
+{"level":"info","message":"Searching global for seed","q":"l","timestamp":"2025-07-18T15:03:57.596Z"}
+{"level":"info","message":"Searching global for seed","q":"m","timestamp":"2025-07-18T15:03:58.956Z"}
+{"level":"info","message":"Searching global for seed","q":"n","timestamp":"2025-07-18T15:04:00.209Z"}
+{"level":"info","message":"Searching global for seed","q":"o","timestamp":"2025-07-18T15:04:01.402Z"}
+{"level":"info","message":"Searching global for seed","q":"p","timestamp":"2025-07-18T15:04:03.060Z"}
+{"level":"info","message":"Searching global for seed","q":"q","timestamp":"2025-07-18T15:04:04.439Z"}
+{"level":"info","message":"Searching global for seed","q":"r","timestamp":"2025-07-18T15:04:05.710Z"}
+{"level":"info","message":"Searching global for seed","q":"s","timestamp":"2025-07-18T15:04:07.060Z"}
+{"level":"info","message":"Searching global for seed","q":"t","timestamp":"2025-07-18T15:04:08.457Z"}
+{"level":"info","message":"Searching global for seed","q":"u","timestamp":"2025-07-18T15:04:09.805Z"}
+{"level":"info","message":"Searching global for seed","q":"v","timestamp":"2025-07-18T15:04:11.047Z"}
+{"level":"info","message":"Searching global for seed","q":"w","timestamp":"2025-07-18T15:04:12.300Z"}
+{"level":"info","message":"Searching global for seed","q":"x","timestamp":"2025-07-18T15:04:13.663Z"}
+{"level":"info","message":"Searching global for seed","q":"y","timestamp":"2025-07-18T15:04:14.915Z"}
+{"level":"info","message":"Searching global for seed","q":"z","timestamp":"2025-07-18T15:04:16.079Z"}
+{"level":"info","message":"Searching global for seed","q":"0","timestamp":"2025-07-18T15:04:17.430Z"}
+{"level":"info","message":"Searching global for seed","q":"1","timestamp":"2025-07-18T15:04:18.704Z"}
+{"level":"info","message":"Searching global for seed","q":"2","timestamp":"2025-07-18T15:04:19.963Z"}
+{"level":"info","message":"Searching global for seed","q":"3","timestamp":"2025-07-18T15:04:21.236Z"}
+{"level":"info","message":"Searching global for seed","q":"4","timestamp":"2025-07-18T15:04:22.548Z"}
+{"level":"info","message":"Searching global for seed","q":"5","timestamp":"2025-07-18T15:04:23.897Z"}
+{"level":"info","message":"Searching global for seed","q":"6","timestamp":"2025-07-18T15:04:25.181Z"}
+{"level":"info","message":"Searching global for seed","q":"7","timestamp":"2025-07-18T15:04:26.479Z"}
+{"level":"info","message":"Searching global for seed","q":"8","timestamp":"2025-07-18T15:04:27.579Z"}
+{"level":"info","message":"Searching global for seed","q":"9","timestamp":"2025-07-18T15:04:28.842Z"}
+{"count":127,"level":"info","message":"Discovered channels saved","timestamp":"2025-07-18T15:04:30.143Z"}
+{"level":"info","message":"MongoDB connected","timestamp":"2025-07-18T15:11:48.216Z"}
+{"level":"info","message":"Crawler MTProto client started","timestamp":"2025-07-18T15:11:49.350Z"}
+{"level":"info","message":"Crawling channel","timestamp":"2025-07-18T15:11:49.351Z","username":"ARZ_PROXY"}
+{"level":"info","message":"Starting bot...","timestamp":"2025-07-18T15:31:35.239Z"}
+{"level":"info","message":"MongoDB connected","timestamp":"2025-07-18T15:31:35.263Z"}
+{"level":"info","message":"Received /start","timestamp":"2025-07-18T15:32:21.249Z","user":"5148047965"}
+{"keyword":"تاسیان","level":"info","message":"Search command invoked","timestamp":"2025-07-18T15:32:30.790Z","user":"5148047965"}
+{"count":0,"keyword":"تاسیان","level":"info","message":"Telegram index search complete","timestamp":"2025-07-18T15:32:30.805Z"}
+{"count":10,"keyword":"تاسیان","level":"info","message":"Web search scraped","timestamp":"2025-07-18T15:32:31.861Z"}
+{"keyword":"تاسیان","level":"info","message":"Search completed","tg":0,"timestamp":"2025-07-18T15:32:31.861Z","total":10,"user":"5148047965","web":10}
+{"level":"info","message":"Discovery client started via SOCKS5","timestamp":"2025-07-18T15:34:55.969Z"}
+{"level":"info","message":"Searching global for seed","q":"a","timestamp":"2025-07-18T15:34:55.973Z"}
+{"level":"info","message":"Searching global for seed","q":"b","timestamp":"2025-07-18T15:34:57.480Z"}
+{"level":"info","message":"Searching global for seed","q":"c","timestamp":"2025-07-18T15:34:58.750Z"}
+{"level":"info","message":"Searching global for seed","q":"d","timestamp":"2025-07-18T15:35:00.104Z"}
+{"level":"info","message":"Searching global for seed","q":"e","timestamp":"2025-07-18T15:35:01.420Z"}
+{"level":"info","message":"Searching global for seed","q":"f","timestamp":"2025-07-18T15:35:02.588Z"}
+{"level":"info","message":"Searching global for seed","q":"g","timestamp":"2025-07-18T15:35:03.993Z"}
+{"level":"info","message":"Searching global for seed","q":"h","timestamp":"2025-07-18T15:35:05.362Z"}
+{"level":"info","message":"Searching global for seed","q":"i","timestamp":"2025-07-18T15:35:06.797Z"}
+{"level":"info","message":"Searching global for seed","q":"j","timestamp":"2025-07-18T15:35:08.377Z"}
+{"level":"info","message":"Searching global for seed","q":"k","timestamp":"2025-07-18T15:35:09.606Z"}
+{"level":"info","message":"Searching global for seed","q":"l","timestamp":"2025-07-18T15:35:10.765Z"}
+{"level":"info","message":"Searching global for seed","q":"m","timestamp":"2025-07-18T15:35:11.962Z"}
+{"level":"info","message":"Searching global for seed","q":"n","timestamp":"2025-07-18T15:35:13.285Z"}
+{"level":"info","message":"Searching global for seed","q":"o","timestamp":"2025-07-18T15:35:14.498Z"}
+{"level":"info","message":"Searching global for seed","q":"p","timestamp":"2025-07-18T15:35:15.737Z"}
+{"level":"info","message":"Searching global for seed","q":"q","timestamp":"2025-07-18T15:35:17.322Z"}
+{"level":"info","message":"Searching global for seed","q":"r","timestamp":"2025-07-18T15:35:18.607Z"}
+{"level":"info","message":"Searching global for seed","q":"s","timestamp":"2025-07-18T15:35:19.823Z"}
+{"level":"info","message":"Searching global for seed","q":"t","timestamp":"2025-07-18T15:35:21.735Z"}
+{"level":"info","message":"Searching global for seed","q":"u","timestamp":"2025-07-18T15:35:22.992Z"}
+{"level":"info","message":"Searching global for seed","q":"v","timestamp":"2025-07-18T15:35:24.280Z"}
+{"level":"info","message":"Searching global for seed","q":"w","timestamp":"2025-07-18T15:35:25.635Z"}
+{"level":"info","message":"Searching global for seed","q":"x","timestamp":"2025-07-18T15:35:27.008Z"}
+{"level":"info","message":"Searching global for seed","q":"y","timestamp":"2025-07-18T15:35:28.281Z"}
+{"level":"info","message":"Searching global for seed","q":"z","timestamp":"2025-07-18T15:35:29.507Z"}
+{"level":"info","message":"Searching global for seed","q":"0","timestamp":"2025-07-18T15:35:30.890Z"}
+{"level":"info","message":"Searching global for seed","q":"1","timestamp":"2025-07-18T15:35:32.064Z"}
+{"level":"info","message":"Searching global for seed","q":"2","timestamp":"2025-07-18T15:35:33.386Z"}
+{"level":"info","message":"Searching global for seed","q":"3","timestamp":"2025-07-18T15:35:34.639Z"}
+{"level":"info","message":"Searching global for seed","q":"4","timestamp":"2025-07-18T15:35:35.861Z"}
+{"level":"info","message":"Searching global for seed","q":"5","timestamp":"2025-07-18T15:35:37.312Z"}
+{"level":"info","message":"Searching global for seed","q":"6","timestamp":"2025-07-18T15:35:38.634Z"}
+{"level":"info","message":"Searching global for seed","q":"7","timestamp":"2025-07-18T15:35:39.935Z"}
+{"level":"info","message":"Searching global for seed","q":"8","timestamp":"2025-07-18T15:35:41.105Z"}
+{"level":"info","message":"Searching global for seed","q":"9","timestamp":"2025-07-18T15:35:42.327Z"}
+{"count":127,"level":"info","message":"Discovered channels saved","timestamp":"2025-07-18T15:35:43.555Z"}
+{"level":"info","message":"MongoDB connected","timestamp":"2025-07-18T15:41:43.481Z"}
+{"level":"info","message":"Crawler MTProto client started","timestamp":"2025-07-18T15:41:44.707Z"}
+{"level":"info","message":"Crawling channel","timestamp":"2025-07-18T15:41:44.709Z","username":"ARZ_PROXY"}
+{"level":"info","message":"Starting bot...","timestamp":"2025-07-18T15:45:50.221Z"}
+{"level":"info","message":"MongoDB connected","timestamp":"2025-07-18T15:45:50.249Z"}
+{"level":"info","message":"Received /start","timestamp":"2025-07-18T15:46:13.718Z","user":"5148047965"}
+{"keyword":"تاسیان","level":"info","message":"Search command invoked","timestamp":"2025-07-18T15:46:19.033Z","user":"5148047965"}
+{"level":"info","message":"MTProto client started","timestamp":"2025-07-18T15:46:20.244Z"}
+{"count":8,"keyword":"تاسیان","level":"info","message":"SearchGlobal found chats","timestamp":"2025-07-18T15:46:20.977Z"}
+{"count":10,"keyword":"تاسیان","level":"info","message":"Web scraped","timestamp":"2025-07-18T15:46:21.455Z"}
+{"chatCount":8,"keyword":"تاسیان","level":"info","message":"Dynamic Telegram search complete","messageCount":126,"timestamp":"2025-07-18T15:46:23.960Z"}
+{"keyword":"تاسیان","level":"info","message":"Search completed","tg":126,"timestamp":"2025-07-18T15:46:23.961Z","total":136,"user":"5148047965","web":10}
+{"error":"400: Bad Request: message is too long","level":"error","message":"performSearch failed","timestamp":"2025-07-18T15:46:25.981Z"}
+{"level":"info","message":"Starting bot...","timestamp":"2025-07-18T15:50:04.164Z"}
+{"level":"info","message":"MongoDB connected","timestamp":"2025-07-18T15:50:04.219Z"}
+{"level":"info","message":"Received /start","timestamp":"2025-07-18T15:50:18.659Z","user":"5148047965"}
+{"keyword":"تاسیان","level":"info","message":"Search command invoked","timestamp":"2025-07-18T15:50:23.766Z","user":"5148047965"}
+{"level":"info","message":"MTProto client started","timestamp":"2025-07-18T15:50:25.027Z"}
+{"count":7,"keyword":"تاسیان","level":"info","message":"SearchGlobal found chats","timestamp":"2025-07-18T15:50:25.569Z"}
+{"count":10,"keyword":"تاسیان","level":"info","message":"Web scraped","timestamp":"2025-07-18T15:50:26.159Z"}
+{"chatCount":7,"keyword":"تاسیان","level":"info","message":"Dynamic Telegram search complete","messageCount":76,"timestamp":"2025-07-18T15:50:28.029Z"}
+{"keyword":"تاسیان","level":"info","message":"Search completed","tg":76,"timestamp":"2025-07-18T15:50:28.031Z","total":86,"user":"5148047965","web":10}
+{"level":"info","message":"MongoDB connected","timestamp":"2025-07-18T16:12:46.723Z"}
+{"level":"info","message":"MTProto client started","timestamp":"2025-07-18T16:13:12.647Z"}
+{"count":10,"keyword":"تاسیان","level":"info","message":"Web search scraped","timestamp":"2025-07-18T16:13:12.676Z"}
+{"chatCount":7,"keyword":"تاسیان","level":"info","message":"Telegram dynamic search complete","messageCount":76,"timestamp":"2025-07-18T16:13:16.781Z"}
+{"level":"info","message":"MongoDB connected","timestamp":"2025-07-18T16:18:57.580Z"}
+{"level":"info","message":"MTProto client started","timestamp":"2025-07-18T16:19:12.131Z"}
+{"count":10,"keyword":"تاسیان","level":"info","message":"Web search complete","timestamp":"2025-07-18T16:19:12.634Z"}
+{"count":6,"keyword":"تاسیان","level":"info","message":"Found chats","timestamp":"2025-07-18T16:19:12.781Z"}
+{"chatCount":6,"keyword":"تاسیان","level":"info","message":"Telegram dynamic search complete","timestamp":"2025-07-18T16:19:15.122Z"}
+{"level":"info","message":"MongoDB connected","timestamp":"2025-07-18T16:47:30.840Z"}
+{"level":"info","message":"MTProto client started","timestamp":"2025-07-18T16:47:59.541Z"}
+{"count":10,"keyword":"تاسیان","level":"info","message":"Web search complete","timestamp":"2025-07-18T16:47:59.851Z"}
+{"count":6,"keyword":"تاسیان","level":"info","message":"Found chats","timestamp":"2025-07-18T16:48:00.257Z"}
+{"chatCount":6,"keyword":"تاسیان","level":"info","message":"Telegram dynamic search complete","timestamp":"2025-07-18T16:48:02.802Z"}
+{"level":"info","message":"MongoDB connected","timestamp":"2025-07-18T16:54:53.108Z"}
+{"count":5,"keyword":"تاسیان","level":"info","message":"Telegram search complete","timestamp":"2025-07-18T16:55:12.229Z"}
+{"count":50,"keyword":"تاسیان","level":"info","message":"Web search complete","timestamp":"2025-07-18T16:55:13.785Z"}
+{"level":"info","message":"MongoDB connected","timestamp":"2025-07-18T17:00:50.390Z"}
+{"level":"info","message":"MTProto client started","timestamp":"2025-07-18T17:01:11.801Z"}
+{"level":"info","message":"MTProto client started","timestamp":"2025-07-18T17:01:12.056Z"}
+{"count":10,"keyword":"تاسیان یک","level":"info","message":"Web search complete","timestamp":"2025-07-18T17:01:13.219Z"}
+{"count":6,"keyword":"تاسیان یک","level":"info","message":"Telegram search complete","timestamp":"2025-07-18T17:01:15.233Z"}
+{"level":"info","message":"MTProto client started","timestamp":"2025-07-18T17:02:34.155Z"}
+{"level":"info","message":"MTProto client started","timestamp":"2025-07-18T17:02:34.157Z"}
+{"count":10,"keyword":"تاسیان","level":"info","message":"Web search complete","timestamp":"2025-07-18T17:02:35.681Z"}
+{"count":3,"keyword":"تاسیان","level":"info","message":"Telegram search complete","timestamp":"2025-07-18T17:02:36.057Z"}
+{"level":"info","message":"MTProto client started","timestamp":"2025-07-18T17:04:18.856Z"}
+{"level":"info","message":"MTProto client started","timestamp":"2025-07-18T17:04:18.863Z"}
+{"count":10,"keyword":"نیمه شب","level":"info","message":"Web search complete","timestamp":"2025-07-18T17:04:20.571Z"}
+{"count":22,"keyword":"نیمه شب","level":"info","message":"Telegram search complete","timestamp":"2025-07-18T17:04:29.847Z"}
+{"error":"400: Bad Request: strings must be encoded in UTF-8","level":"error","message":"Search failed","timestamp":"2025-07-18T17:04:31.937Z"}
+{"level":"info","message":"MongoDB connected","timestamp":"2025-07-18T17:06:12.839Z"}
+{"level":"info","message":"MTProto client started","timestamp":"2025-07-18T17:06:26.057Z"}
+{"level":"info","message":"MTProto client started","timestamp":"2025-07-18T17:06:26.340Z"}
+{"count":10,"keyword":"نیمه شب","level":"info","message":"Web search complete","timestamp":"2025-07-18T17:06:28.424Z"}
+{"count":21,"keyword":"نیمه شب","level":"info","message":"Telegram search complete","timestamp":"2025-07-18T17:06:36.466Z"}
+{"error":"Search validation failed: results.telegram.0.username: Path `username` is required., results.telegram.1.username: Path `username` is required., results.telegram.2.username: Path `username` is required., results.telegram.3.username: Path `username` is required., results.telegram.4.username: Path `username` is required., results.telegram.5.username: Path `username` is required., results.telegram.6.username: Path `username` is required., results.telegram.7.username: Path `username` is required., results.telegram.8.username: Path `username` is required., results.telegram.9.username: Path `username` is required., results.telegram.10.username: Path `username` is required., results.telegram.11.username: Path `username` is required., results.telegram.12.username: Path `username` is required., results.telegram.13.username: Path `username` is required., results.telegram.14.username: Path `username` is required., results.telegram.15.username: Path `username` is required., results.telegram.16.username: Path `username` is required., results.telegram.17.username: Path `username` is required., results.telegram.18.username: Path `username` is required., results.telegram.19.username: Path `username` is required., results.telegram.20.username: Path `username` is required.","level":"error","message":"Search failed","timestamp":"2025-07-18T17:06:36.528Z"}
+{"level":"info","message":"MTProto client started","timestamp":"2025-07-18T17:07:15.793Z"}
+{"level":"info","message":"MTProto client started","timestamp":"2025-07-18T17:07:15.797Z"}
+{"count":10,"keyword":"نیمه شب","level":"info","message":"Web search complete","timestamp":"2025-07-18T17:07:18.176Z"}
+{"count":20,"keyword":"نیمه شب","level":"info","message":"Telegram search complete","timestamp":"2025-07-18T17:07:25.346Z"}
+{"error":"Search validation failed: results.telegram.0.username: Path `username` is required., results.telegram.1.username: Path `username` is required., results.telegram.2.username: Path `username` is required., results.telegram.3.username: Path `username` is required., results.telegram.4.username: Path `username` is required., results.telegram.5.username: Path `username` is required., results.telegram.6.username: Path `username` is required., results.telegram.7.username: Path `username` is required., results.telegram.8.username: Path `username` is required., results.telegram.9.username: Path `username` is required., results.telegram.10.username: Path `username` is required., results.telegram.11.username: Path `username` is required., results.telegram.12.username: Path `username` is required., results.telegram.13.username: Path `username` is required., results.telegram.14.username: Path `username` is required., results.telegram.15.username: Path `username` is required., results.telegram.16.username: Path `username` is required., results.telegram.17.username: Path `username` is required., results.telegram.18.username: Path `username` is required., results.telegram.19.username: Path `username` is required.","level":"error","message":"Search failed","timestamp":"2025-07-18T17:07:25.412Z"}
+{"level":"info","message":"MTProto client started","timestamp":"2025-07-18T17:13:13.655Z"}
+{"level":"info","message":"MTProto client started","timestamp":"2025-07-18T17:13:13.661Z"}
+{"count":10,"keyword":"نیمه شب","level":"info","message":"Web search complete","timestamp":"2025-07-18T17:13:15.403Z"}
+{"count":19,"keyword":"نیمه شب","level":"info","message":"Telegram search complete","timestamp":"2025-07-18T17:13:23.197Z"}
+{"error":"Search validation failed: results.telegram.0.username: Path `username` is required., results.telegram.1.username: Path `username` is required., results.telegram.2.username: Path `username` is required., results.telegram.3.username: Path `username` is required., results.telegram.4.username: Path `username` is required., results.telegram.5.username: Path `username` is required., results.telegram.6.username: Path `username` is required., results.telegram.7.username: Path `username` is required., results.telegram.8.username: Path `username` is required., results.telegram.9.username: Path `username` is required., results.telegram.10.username: Path `username` is required., results.telegram.11.username: Path `username` is required., results.telegram.12.username: Path `username` is required., results.telegram.13.username: Path `username` is required., results.telegram.14.username: Path `username` is required., results.telegram.15.username: Path `username` is required., results.telegram.16.username: Path `username` is required., results.telegram.17.username: Path `username` is required., results.telegram.18.username: Path `username` is required.","level":"error","message":"Search failed","timestamp":"2025-07-18T17:13:23.253Z"}
+{"level":"info","message":"MongoDB connected","timestamp":"2025-07-18T17:26:38.660Z"}
+{"level":"info","message":"MTProto client started","timestamp":"2025-07-18T17:26:56.543Z"}
+{"level":"info","message":"MTProto client started","timestamp":"2025-07-18T17:26:56.548Z"}
+{"count":10,"keyword":"نیمه شب","level":"info","message":"Web search complete","timestamp":"2025-07-18T17:26:58.287Z"}
+{"count":19,"keyword":"نیمه شب","level":"info","message":"Telegram search complete","timestamp":"2025-07-18T17:27:06.420Z"}
+{"level":"info","message":"MongoDB connected","timestamp":"2025-07-18T17:40:24.747Z"}
+{"level":"info","message":"MTProto client started","timestamp":"2025-07-18T17:40:39.971Z"}
+{"level":"info","message":"MTProto client started","timestamp":"2025-07-18T17:40:40.241Z"}
+{"count":0,"keyword":"تاسیان","level":"info","message":"Found chats via SearchGlobal","timestamp":"2025-07-18T17:40:40.501Z"}
+{"count":0,"keyword":"تاسیان","level":"info","message":"Telegram dynamic search complete","timestamp":"2025-07-18T17:40:40.503Z"}
+{"count":10,"keyword":"تاسیان","level":"info","message":"Web search complete","timestamp":"2025-07-18T17:40:41.972Z"}
+{"level":"info","message":"MTProto client started","timestamp":"2025-07-18T17:41:23.997Z"}
+{"level":"info","message":"MTProto client started","timestamp":"2025-07-18T17:41:24.004Z"}
+{"count":24,"keyword":"نیمه شب","level":"info","message":"Found chats via SearchGlobal","timestamp":"2025-07-18T17:41:24.739Z"}
+{"count":10,"keyword":"نیمه شب","level":"info","message":"Web search complete","timestamp":"2025-07-18T17:41:25.512Z"}
+{"count":23,"keyword":"نیمه شب","level":"info","message":"Telegram dynamic search complete","timestamp":"2025-07-18T17:41:37.418Z"}
+{"level":"info","message":"MTProto client started","timestamp":"2025-07-18T17:42:28.607Z"}
+{"level":"info","message":"MTProto client started","timestamp":"2025-07-18T17:42:28.612Z"}
+{"count":0,"keyword":"تاسیان","level":"info","message":"Found chats via SearchGlobal","timestamp":"2025-07-18T17:42:29.213Z"}
+{"count":0,"keyword":"تاسیان","level":"info","message":"Telegram dynamic search complete","timestamp":"2025-07-18T17:42:29.214Z"}
+{"count":10,"keyword":"تاسیان","level":"info","message":"Web search complete","timestamp":"2025-07-18T17:42:30.197Z"}
+{"level":"info","message":"MongoDB connected","timestamp":"2025-07-18T17:45:13.693Z"}
+{"level":"info","message":"MTProto client started","timestamp":"2025-07-18T17:45:29.837Z"}
+{"level":"info","message":"MTProto client started","timestamp":"2025-07-18T17:45:29.848Z"}
+{"count":7,"keyword":"تاسیان","level":"info","message":"contacts.Search found","timestamp":"2025-07-18T17:45:30.253Z"}
+{"count":7,"keyword":"تاسیان","level":"info","message":"SearchGlobal found","timestamp":"2025-07-18T17:45:30.804Z"}
+{"count":10,"keyword":"تاسیان","level":"info","message":"Web search complete","timestamp":"2025-07-18T17:45:31.208Z"}
+{"count":7,"keyword":"تاسیان","level":"info","message":"Telegram dynamic search complete","timestamp":"2025-07-18T17:45:33.649Z"}
+{"level":"info","message":"MTProto client started","timestamp":"2025-07-18T17:47:25.132Z"}
+{"level":"info","message":"MTProto client started","timestamp":"2025-07-18T17:47:25.135Z"}
+{"count":4,"keyword":"شکارگاه یک","level":"info","message":"contacts.Search found","timestamp":"2025-07-18T17:47:25.658Z"}
+{"count":9,"keyword":"شکارگاه یک","level":"info","message":"SearchGlobal found","timestamp":"2025-07-18T17:47:26.036Z"}
+{"count":10,"keyword":"شکارگاه یک","level":"info","message":"Web search complete","timestamp":"2025-07-18T17:47:26.866Z"}
+{"count":9,"keyword":"شکارگاه یک","level":"info","message":"Telegram dynamic search complete","timestamp":"2025-07-18T17:47:29.014Z"}

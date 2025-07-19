@@ -1,0 +1,24 @@
+{
+  "name": "telegram-search-bot",
+  "version": "1.0.0",
+  "description": "1. Copy `.env.example` to `.env` and fill in credentials. 2. `npm install` 3. `npm start`",
+  "license": "ISC",
+  "author": "",
+  "type": "commonjs",
+  "main": "src/bot.js",
+  "scripts": {
+    "start": "node src/bot.js"
+  },
+  "dependencies": {
+    "axios": "^1.10.0",
+    "cheerio": "^1.1.0",
+    "dotenv": "^16.0.3",
+    "google-it": "^1.6.4",
+    "mongoose": "^6.7.0",
+    "prompt-sync": "^4.2.0",
+    "socks-proxy-agent": "^8.0.5",
+    "telegraf": "^4.12.0",
+    "telegram": "^2.26.22",
+    "winston": "^3.8.2"
+  }
+}
