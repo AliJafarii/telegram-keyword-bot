@@ -1,0 +1,10 @@
+node_modules
+dist
+logs
+data
+*.tsbuildinfo
+.DS_Store
+.node-localstorage
+.env.development.global
+.env.development.iran
+.env.production
