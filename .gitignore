@@ -1,0 +1,12 @@
+node_modules
+dist
+logs
+data
+*.tsbuildinfo
+.DS_Store
+.node-localstorage
+.node-localstorage-shm
+.node-localstorage-wal
+.env
+.env.development
+.env.production

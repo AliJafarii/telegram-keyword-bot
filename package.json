@@ -1,0 +1,43 @@
+{
+  "name": "telegram-search-bot",
+  "version": "2.0.0",
+  "description": "NestJS + TypeScript refactor",
+  "license": "ISC",
+  "author": "",
+  "type": "commonjs",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "start": "ENV_FILE=.env.production node --localstorage-file=.node-localstorage dist/main.js",
+    "start:dev": "ENV_FILE=.env.development NODE_OPTIONS=--localstorage-file=.node-localstorage ts-node -r tsconfig-paths/register src/main.ts",
+    "start:prod": "ENV_FILE=.env.production node --localstorage-file=.node-localstorage dist/main.js",
+    "migrate:oracle": "ts-node -r tsconfig-paths/register src/migrate.ts",
+    "db:cleanup": "ts-node -r tsconfig-paths/register src/database/cleanup-schema.ts",
+    "db:reset": "ts-node -r tsconfig-paths/register src/database/reset-schema.ts"
+  },
+  "dependencies": {
+    "@nestjs/common": "^10.4.5",
+    "@nestjs/config": "^3.2.3",
+    "@nestjs/core": "^10.4.5",
+    "@nestjs/platform-express": "^10.4.5",
+    "@nestjs/typeorm": "^10.0.2",
+    "dotenv": "^16.6.1",
+    "mongodb": "^6.11.0",
+    "oracledb": "^6.5.0",
+    "prompt-sync": "^4.2.0",
+    "redis": "^4.7.1",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1",
+    "socks-proxy-agent": "^8.0.5",
+    "telegraf": "^4.12.0",
+    "telegram": "^2.26.22",
+    "typeorm": "^0.3.20",
+    "winston": "^3.8.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "ts-node": "^10.9.2",
+    "tsconfig-paths": "^4.2.0",
+    "typescript": "^5.4.5"
+  }
+}
