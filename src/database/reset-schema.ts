@@ -1,6 +1,8 @@
-import 'dotenv/config';
+import { config as loadEnv } from 'dotenv';
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const oracledb = require('oracledb');
+
+loadEnv({ path: process.env.ENV_FILE || '.env.production' });
 
 const q = (id: string) => `"${id.replace(/"/g, '""')}"`;
 
@@ -98,6 +100,11 @@ async function recreateSchema() {
         ${q('message_link')} VARCHAR2(512),
         ${q('message_id')} NUMBER,
         ${q('date')} TIMESTAMP,
+        ${q('match_reason')} VARCHAR2(32),
+        ${q('iteration_no')} NUMBER,
+        ${q('discovered_via_link')} VARCHAR2(512),
+        ${q('discovered_from_message_link')} VARCHAR2(512),
+        ${q('discovered_from_channel')} VARCHAR2(128),
         ${q('text')} CLOB,
         ${q('LINKS')} VARCHAR2(4000),
         CONSTRAINT ${q('PK_CHANNEL_MATCHES')} PRIMARY KEY (${q('id')}),

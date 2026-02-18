@@ -7,7 +7,7 @@ import { ChannelMatchEntity } from '../entities/channel-match.entity';
 import { CrawlStepEntity } from '../entities/crawl-step.entity';
 import { SearchLinkEntity } from '../entities/search-link.entity';
 
-loadEnv();
+loadEnv({ path: process.env.ENV_FILE || '.env.production' });
 
 export const AppDataSource = new DataSource({
   type: 'oracle',

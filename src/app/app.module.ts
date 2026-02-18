@@ -7,12 +7,13 @@ import { SearchModule } from '../search/search.module';
 import { BotModule } from '../bot/bot.module';
 import { typeOrmConfig } from '../database/typeorm.config';
 import { StorageModule } from '../storage/storage.module';
+import { HealthController } from './health.controller';
 
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
-      envFilePath: process.env.ENV_FILE || '.env',
+      envFilePath: process.env.ENV_FILE || '.env.production',
       load: [configuration]
     }),
     TypeOrmModule.forRootAsync({
@@ -23,6 +24,7 @@ import { StorageModule } from '../storage/storage.module';
     SearchModule,
     BotModule
   ],
+  controllers: [HealthController],
   providers: [LoggerService],
   exports: [LoggerService]
 })

@@ -28,6 +28,21 @@ export class ChannelMatchEntity {
   @Column({ type: 'timestamp', nullable: true })
   date?: Date;
 
+  @Column({ type: 'varchar2', length: 32, nullable: true })
+  match_reason?: string;
+
+  @Column({ type: 'number', nullable: true })
+  iteration_no?: number;
+
+  @Column({ type: 'varchar2', length: 512, nullable: true })
+  discovered_via_link?: string;
+
+  @Column({ type: 'varchar2', length: 512, nullable: true })
+  discovered_from_message_link?: string;
+
+  @Column({ type: 'varchar2', length: 128, nullable: true })
+  discovered_from_channel?: string;
+
   @Column({ type: 'clob', nullable: true })
   @Index()
   text?: string;

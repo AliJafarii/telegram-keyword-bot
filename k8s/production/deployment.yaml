@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telegram-keyword-bot
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: telegram-keyword-bot
+  template:
+    metadata:
+      labels:
+        app: telegram-keyword-bot
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: bot
+          image: ghcr.io/alijafarii/telegram-keyword-bot:v2
+          imagePullPolicy: IfNotPresent
+          command:
+            - node
+          args:
+            - --localstorage-file=/app/state/.node-localstorage
+            - dist/main.js
+          envFrom:
+            - configMapRef:
+                name: telegram-keyword-bot-config
+            - secretRef:
+                name: telegram-keyword-bot-secret
+          ports:
+            - name: http
+              containerPort: 3000
+          resources:
+            requests:
+              cpu: 500m
+              memory: 768Mi
+            limits:
+              cpu: 1500m
+              memory: 1536Mi
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            failureThreshold: 30
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 2
+            failureThreshold: 3
+          volumeMounts:
+            - name: app-state
+              mountPath: /app/state
+      volumes:
+        - name: app-state
+          persistentVolumeClaim:
+            claimName: telegram-keyword-bot-state

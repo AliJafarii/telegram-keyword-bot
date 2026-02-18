@@ -1,6 +1,8 @@
-import 'dotenv/config';
+import { config as loadEnv } from 'dotenv';
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const oracledb = require('oracledb');
+
+loadEnv({ path: process.env.ENV_FILE || '.env.production' });
 
 const q = (id: string) => `"${id.replace(/"/g, '""')}"`;
 const IGNORABLE_ERRORS = /ORA-00955|ORA-01408|ORA-02275|ORA-02261|ORA-02260|ORA-01430|ORA-02443|ORA-01442/i;
@@ -238,6 +240,11 @@ async function cleanup() {
       'channel',
       'message_id',
       'date',
+      'match_reason',
+      'iteration_no',
+      'discovered_via_link',
+      'discovered_from_message_link',
+      'discovered_from_channel',
       'text',
       'links',
       'search_ref',
@@ -268,6 +275,16 @@ async function cleanup() {
     await ensureColumn(conn, channelMatchesTable, channelCols, 'channel_link', 'VARCHAR2(512)');
     channelCols = await getColumns(conn, channelMatchesTable);
     await ensureColumn(conn, channelMatchesTable, channelCols, 'message_link', 'VARCHAR2(512)');
+    channelCols = await getColumns(conn, channelMatchesTable);
+    await ensureColumn(conn, channelMatchesTable, channelCols, 'match_reason', 'VARCHAR2(32)');
+    channelCols = await getColumns(conn, channelMatchesTable);
+    await ensureColumn(conn, channelMatchesTable, channelCols, 'iteration_no', 'NUMBER');
+    channelCols = await getColumns(conn, channelMatchesTable);
+    await ensureColumn(conn, channelMatchesTable, channelCols, 'discovered_via_link', 'VARCHAR2(512)');
+    channelCols = await getColumns(conn, channelMatchesTable);
+    await ensureColumn(conn, channelMatchesTable, channelCols, 'discovered_from_message_link', 'VARCHAR2(512)');
+    channelCols = await getColumns(conn, channelMatchesTable);
+    await ensureColumn(conn, channelMatchesTable, channelCols, 'discovered_from_channel', 'VARCHAR2(128)');
     channelCols = await getColumns(conn, channelMatchesTable);
 
     const cmSearchId = resolveColumn(channelCols, 'search_id');

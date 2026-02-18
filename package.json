@@ -8,12 +8,14 @@
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "start": "ENV_FILE=.env.production node --localstorage-file=.node-localstorage dist/main.js",
+    "start": "npm run start:prod",
     "start:dev": "ENV_FILE=.env.development NODE_OPTIONS=--localstorage-file=.node-localstorage ts-node -r tsconfig-paths/register src/main.ts",
+    "prestart:prod": "npm run build",
     "start:prod": "ENV_FILE=.env.production node --localstorage-file=.node-localstorage dist/main.js",
-    "migrate:oracle": "ts-node -r tsconfig-paths/register src/migrate.ts",
-    "db:cleanup": "ts-node -r tsconfig-paths/register src/database/cleanup-schema.ts",
-    "db:reset": "ts-node -r tsconfig-paths/register src/database/reset-schema.ts"
+    "migrate:oracle": "ENV_FILE=.env.production ts-node -r tsconfig-paths/register src/migrate.ts",
+    "db:cleanup": "ENV_FILE=.env.production ts-node -r tsconfig-paths/register src/database/cleanup-schema.ts",
+    "db:reset": "ENV_FILE=.env.production ts-node -r tsconfig-paths/register src/database/reset-schema.ts",
+    "session:generate": "ENV_FILE=.env.production ts-node -r tsconfig-paths/register src/tools/generate-session.ts"
   },
   "dependencies": {
     "@nestjs/common": "^10.4.5",
@@ -32,7 +34,8 @@
     "telegraf": "^4.12.0",
     "telegram": "^2.26.22",
     "typeorm": "^0.3.20",
-    "winston": "^3.8.2"
+    "winston": "^3.8.2",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@types/node": "^20.11.30",

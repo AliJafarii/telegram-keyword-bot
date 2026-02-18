@@ -4,6 +4,7 @@ import { StringSession } from 'telegram/sessions';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { randomBytes } from 'crypto';
 import { LoggerService } from '../common/logger.service';
 import { CrawlStepEntity } from '../entities/crawl-step.entity';
 import { ChannelMatchEntity } from '../entities/channel-match.entity';
@@ -32,10 +33,29 @@ interface SearchLinkTableMeta {
   columnsByLower: Map<string, string>;
 }
 
+interface FrontierChatState {
+  chat: Api.TypeChat;
+  discoveredViaLink?: string;
+  discoveredFromMessageLink?: string;
+  discoveredFromChannel?: string;
+}
+
+type ParsedTargetKind = 'invite' | 'bot' | 'public_chat' | 'public_message' | 'private_message' | 'private_chat';
+
+interface ParsedTargetLink {
+  kind: ParsedTargetKind;
+  canonical: string;
+  username?: string;
+  botStartParam?: string;
+  privateChannelId?: string;
+  messageId?: number;
+}
+
 @Injectable()
 export class SearchService {
   private readonly client: TelegramClient;
   private sessionLoaded = false;
+  private sessionInitPromise: Promise<void> | null = null;
   private channelMatchSchemaMode: 'unknown' | 'extended' | 'legacy' = 'unknown';
   private channelMatchTableMeta: ChannelMatchTableMeta | null = null;
   private searchLinkTableMeta: SearchLinkTableMeta | null = null;
@@ -69,21 +89,62 @@ export class SearchService {
 
   private async initUserClient() {
     if (this.sessionLoaded) return;
-    this.logger.log('Initializing GramJS client');
-    const apiId = Number(this.config.get<number>('apiId'));
-    const apiHash = this.config.get<string>('apiHash') || '';
-    const sessionString = this.config.get<string>('sessionString') || '';
-    if (!apiId || !apiHash || !sessionString) {
-      throw new Error('Missing API_ID / API_HASH / SESSION_STRING in .env');
+    if (this.sessionInitPromise) {
+      await this.sessionInitPromise;
+      return;
     }
-    await this.client.start({
-      phoneNumber: async () => '',
-      phoneCode: async () => '',
-      password: async () => '',
-      onError: console.error
-    });
-    this.sessionLoaded = true;
-    this.logger.log('MTProto client started');
+
+    this.sessionInitPromise = (async () => {
+      const initTimeoutMs = Math.max(5000, Number(this.config.get<number>('mtprotoInitTimeoutMs') || 30000));
+      this.logger.log('Initializing GramJS client', {
+        timeoutMs: initTimeoutMs,
+        proxyEnabled: Boolean(process.env.SOCKS_PROXY)
+      });
+      const apiId = Number(this.config.get<number>('apiId'));
+      const apiHash = this.config.get<string>('apiHash') || '';
+      const sessionString = this.config.get<string>('sessionString') || '';
+      if (!apiId || !apiHash || !sessionString) {
+        throw new Error(
+          'Missing API_ID / API_HASH / SESSION_STRING in environment. Production must use a pre-generated SESSION_STRING.'
+        );
+      }
+
+      try {
+        await this.invokeWithTimeout(this.client.connect(), initTimeoutMs, 'mtproto_connect');
+        const isAuthorized = await this.invokeWithTimeout(
+          this.client.checkAuthorization(),
+          initTimeoutMs,
+          'mtproto_check_authorization'
+        );
+        if (!isAuthorized) {
+          throw new Error(
+            'SESSION_STRING is not authorized. Generate a valid user session string and set SESSION_STRING.'
+          );
+        }
+      } catch (err) {
+        const errAny = err as any;
+        if (errAny?.code === 420 && typeof errAny?.seconds === 'number') {
+          throw new Error(
+            `Telegram flood wait (${errAny.seconds}s) during auth. Avoid repeated auth attempts and use a valid persistent SESSION_STRING.`
+          );
+        }
+        if (err instanceof Error && /timeout after/i.test(err.message)) {
+          throw new Error(
+            `MTProto init timeout after ${initTimeoutMs}ms. If this host cannot reach Telegram MTProto directly, configure SOCKS_PROXY.`
+          );
+        }
+        throw err;
+      }
+
+      this.sessionLoaded = true;
+      this.logger.log('MTProto client started');
+    })();
+
+    try {
+      await this.sessionInitPromise;
+    } finally {
+      this.sessionInitPromise = null;
+    }
   }
 
   private extractLinksFromText(text: string): string[] {
@@ -129,7 +190,12 @@ export class SearchService {
     return Array.from(
       new Set(
         links
-          .map((l) => this.canonicalizeTelegramLink(l))
+          .map((l) => {
+            const parsed = this.parseTargetLink(l);
+            if (!parsed) return null;
+            if (parsed.kind === 'bot') return this.normalizeLink(l);
+            return parsed.canonical;
+          })
           .filter((l): l is string => Boolean(l))
       )
     );
@@ -166,6 +232,21 @@ export class SearchService {
     return null;
   }
 
+  private extractBotStartParam(link: string): string | undefined {
+    try {
+      const parsed = new URL(link);
+      const start = parsed.searchParams.get('start');
+      if (start) return start;
+      const startGroup = parsed.searchParams.get('startgroup');
+      if (startGroup) return startGroup;
+      const startApp = parsed.searchParams.get('startapp');
+      if (startApp) return startApp;
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   private canonicalizeInviteLink(link: string): string | null {
     const hash = this.parseInviteHash(link);
     if (!hash) return null;
@@ -185,8 +266,98 @@ export class SearchService {
     return this.normalizeLink(`https://t.me/${username}`);
   }
 
+  private parseTargetLink(link: string): ParsedTargetLink | null {
+    const normalized = this.normalizeLink(link);
+    if (!normalized || !this.isTelegramLink(normalized)) return null;
+
+    if (this.isInviteLink(normalized)) {
+      const invite = this.canonicalizeInviteLink(normalized);
+      return invite ? { kind: 'invite', canonical: invite } : null;
+    }
+
+    const privateMsgMatch = normalized.match(/^https:\/\/t\.me\/c\/(\d+)\/(\d+)(?:[/?#].*)?$/i);
+    if (privateMsgMatch) {
+      const messageId = Number.parseInt(privateMsgMatch[2], 10);
+      if (!Number.isFinite(messageId) || messageId <= 0) return null;
+      return {
+        kind: 'private_message',
+        canonical: `https://t.me/c/${privateMsgMatch[1]}/${messageId}`,
+        privateChannelId: privateMsgMatch[1],
+        messageId
+      };
+    }
+
+    const privateChatMatch = normalized.match(/^https:\/\/t\.me\/c\/(\d+)\/?(?:[?#].*)?$/i);
+    if (privateChatMatch) {
+      return {
+        kind: 'private_chat',
+        canonical: `https://t.me/c/${privateChatMatch[1]}`,
+        privateChannelId: privateChatMatch[1]
+      };
+    }
+
+    const publicMsgMatch = normalized.match(/^https:\/\/t\.me\/(?:s\/)?([A-Za-z0-9_]+)\/(\d+)(?:[/?#].*)?$/i);
+    if (publicMsgMatch) {
+      const username = this.extractUsernameFromLink(`https://t.me/${publicMsgMatch[1]}`);
+      if (!username) return null;
+      const messageId = Number.parseInt(publicMsgMatch[2], 10);
+      if (!Number.isFinite(messageId) || messageId <= 0) return null;
+      return {
+        kind: 'public_message',
+        canonical: `https://t.me/${username}/${messageId}`,
+        username,
+        messageId
+      };
+    }
+
+    const username = this.extractUsernameFromLink(normalized);
+    if (!username) return null;
+    const canonical = this.normalizeLink(`https://t.me/${username}`);
+    if (/bot$/i.test(username)) {
+      return {
+        kind: 'bot',
+        canonical,
+        username,
+        botStartParam: this.extractBotStartParam(normalized)
+      };
+    }
+    return {
+      kind: 'public_chat',
+      canonical,
+      username
+    };
+  }
+
   private getChatUsername(chat: Api.TypeChat): string | undefined {
     return 'username' in chat ? chat.username : undefined;
+  }
+
+  private getChatIdentityText(chat: Api.TypeChat): string {
+    const chatAny = chat as any;
+    const parts: string[] = [];
+    const username = this.getChatUsername(chat);
+    if (username) parts.push(username);
+    if (typeof chatAny?.title === 'string' && chatAny.title.trim()) parts.push(chatAny.title.trim());
+    if (typeof chatAny?.firstName === 'string' && chatAny.firstName.trim()) parts.push(chatAny.firstName.trim());
+    if (typeof chatAny?.lastName === 'string' && chatAny.lastName.trim()) parts.push(chatAny.lastName.trim());
+
+    const usernames = Array.isArray(chatAny?.usernames) ? chatAny.usernames : [];
+    for (const item of usernames) {
+      const uname = typeof item === 'string'
+        ? item
+        : typeof item?.username === 'string'
+          ? item.username
+          : '';
+      if (uname.trim()) parts.push(uname.trim());
+    }
+
+    return parts.join(' ').trim();
+  }
+
+  private chatIdentityContainsKeyword(chat: Api.TypeChat, keywordTerms: string[]): boolean {
+    const text = this.getChatIdentityText(chat);
+    if (!text) return false;
+    return this.messageContainsKeyword(text, keywordTerms);
   }
 
   private classifyChatType(chat: Api.TypeChat): StoredChannelType {
@@ -279,24 +450,20 @@ export class SearchService {
     return prev[bLen] <= maxDistance;
   }
 
-  private fuzzyIncludes(text: string, term: string, maxDistance: number): boolean {
-    if (!text || !term) return false;
-    if (text.includes(term)) return true;
+  private fuzzyIncludes(tokens: string[], term: string, maxDistance: number): boolean {
+    if (!tokens.length || !term) return false;
     if (maxDistance <= 0) return false;
 
     const termLen = term.length;
-    const minWindow = Math.max(1, termLen - maxDistance);
-    const maxWindow = Math.min(text.length, termLen + maxDistance);
-    if (minWindow > maxWindow) return false;
+    const termFirst = term.charAt(0);
+    const termLast = term.charAt(termLen - 1);
 
-    for (let start = 0; start <= text.length - minWindow; start += 1) {
-      const fromEnd = start + minWindow;
-      const toEnd = Math.min(text.length, start + maxWindow);
-      for (let end = fromEnd; end <= toEnd; end += 1) {
-        if (this.levenshteinWithin(text.slice(start, end), term, maxDistance)) {
-          return true;
-        }
-      }
+    for (const token of tokens) {
+      if (!token) continue;
+      if (Math.abs(token.length - termLen) > maxDistance) continue;
+      if (token.charAt(0) !== termFirst) continue;
+      if (termLen >= 4 && token.charAt(token.length - 1) !== termLast) continue;
+      if (this.levenshteinWithin(token, term, maxDistance)) return true;
     }
 
     return false;
@@ -319,8 +486,9 @@ export class SearchService {
 
   private messageContainsKeyword(text: string, keywordTerms: string[]): boolean {
     if (!keywordTerms.length) return false;
-    const compactText = this.compactForSearch(text);
-    if (!compactText) return false;
+    const normalizedTokens = this.tokenizeForSearch(text).filter(Boolean);
+    if (!normalizedTokens.length) return false;
+    const compactText = normalizedTokens.join('');
     const terms = keywordTerms.map((part) => this.compactForSearch(part)).filter(Boolean);
     if (!terms.length) return false;
 
@@ -338,7 +506,7 @@ export class SearchService {
       const maxDistance = Math.min(fuzzyMaxDistanceCfg, adaptiveDistance);
       if (maxDistance <= 0) return false;
 
-      return this.fuzzyIncludes(compactText, part, maxDistance);
+      return this.fuzzyIncludes(normalizedTokens, part, maxDistance);
     });
   }
 
@@ -414,20 +582,268 @@ export class SearchService {
     return null;
   }
 
-  private async resolveChatFromLink(link: string, autoJoinInvites: boolean): Promise<Api.TypeChat | null> {
-    const canonical = this.canonicalizeTelegramLink(link);
-    if (!canonical) return null;
-    if (this.isInviteLink(canonical)) {
-      if (!autoJoinInvites) return null;
-      return this.joinInviteIfNeeded(canonical);
-    }
-    const username = this.extractUsernameFromLink(canonical);
-    if (!username) return null;
+  private async leaveChannelIfNeeded(chat: Api.TypeChat, searchId: number): Promise<void> {
+    const chatAny = chat as any;
+    const chatType = String(chatAny?._ || '').toLowerCase();
+    if (!chatType.includes('channel')) return;
+    const chatKey = this.getChatKey(chat);
     try {
-      return await this.client.getEntity(`@${username}`) as Api.TypeChat;
-    } catch {
-      return null;
+      await this.invokeWithTimeout(
+        this.client.invoke(
+          new Api.channels.LeaveChannel({
+            channel: chat as any
+          } as any)
+        ),
+        15000,
+        'iterative_leave_channel'
+      );
+      await this.logStep(searchId, 'iterative_private_chat_left', { chat: chatKey });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.logStep(searchId, 'iterative_private_chat_leave_error', { chat: chatKey, error: message });
     }
+  }
+
+  private async leaveJoinedPrivateChats(chats: Api.TypeChat[], searchId: number): Promise<void> {
+    for (const chat of chats) {
+      await this.leaveChannelIfNeeded(chat, searchId);
+    }
+  }
+
+  private randomLong(): bigint {
+    const raw = randomBytes(8).toString('hex');
+    const asBigInt = BigInt(`0x${raw}`);
+    return BigInt.asUintN(63, asBigInt);
+  }
+
+  private async startBotIfNeeded(username: string, startParam: string | undefined, searchId: number): Promise<void> {
+    const command = startParam ? `/start ${startParam}` : '/start';
+    try {
+      const peer = await this.invokeWithTimeout(
+        this.client.getInputEntity(`@${username}`) as Promise<Api.TypeInputPeer>,
+        15000,
+        'iterative_bot_start_input'
+      );
+      await this.invokeWithTimeout(
+        this.client.invoke(
+          new Api.messages.SendMessage({
+            peer: peer as any,
+            message: command,
+            randomId: this.randomLong() as any,
+            noWebpage: true
+          } as any)
+        ),
+        15000,
+        'iterative_bot_start_send'
+      );
+      await this.logStep(searchId, 'iterative_bot_started', {
+        bot: username,
+        startParam: startParam || null
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.logStep(searchId, 'iterative_bot_start_error', {
+        bot: username,
+        startParam: startParam || null,
+        error: message
+      });
+    }
+  }
+
+  private async resolveChatFromParsedLink(
+    parsed: ParsedTargetLink,
+    autoJoinInvites: boolean
+  ): Promise<Api.TypeChat | null> {
+    if (parsed.kind === 'invite') {
+      if (!autoJoinInvites) return null;
+      return this.joinInviteIfNeeded(parsed.canonical);
+    }
+
+    if (parsed.username) {
+      try {
+        return await this.client.getEntity(`@${parsed.username}`) as Api.TypeChat;
+      } catch {
+        return null;
+      }
+    }
+
+    if ((parsed.kind === 'private_message' || parsed.kind === 'private_chat') && parsed.privateChannelId) {
+      try {
+        const fullId = BigInt(`-100${parsed.privateChannelId}`);
+        return await this.client.getEntity(fullId as any) as Api.TypeChat;
+      } catch {
+        return null;
+      }
+    }
+
+    return null;
+  }
+
+  private classifyClientLinkType(link: string): string {
+    const parsed = this.parseTargetLink(link);
+    if (!parsed) return 'message';
+    if (parsed.kind === 'bot') return 'bot';
+    if (parsed.kind === 'invite') return 'invite';
+    if (parsed.kind === 'public_chat' || parsed.kind === 'private_chat') return 'chat';
+    return 'message';
+  }
+
+  private async targetMessageContainsKeyword(
+    chat: Api.TypeChat,
+    messageId: number,
+    keywordTerms: string[]
+  ): Promise<boolean> {
+    if (!Number.isFinite(messageId) || messageId <= 0) return false;
+    let inputPeer: Api.TypeInputPeer;
+    try {
+      inputPeer = await this.invokeWithTimeout(
+        this.client.getInputEntity(chat) as Promise<Api.TypeInputPeer>,
+        15000,
+        'target_message_input_peer'
+      );
+    } catch {
+      return false;
+    }
+
+    try {
+      const page = await this.fetchHistoryPage(
+        inputPeer,
+        messageId + 1,
+        5,
+        15000
+      );
+      const exact = page.find((m) => Number((m as any)?.id || 0) === messageId);
+      if (!exact) return false;
+      const text = String((exact as any)?.message || '');
+      return this.messageContainsKeyword(text, keywordTerms);
+    } catch {
+      return false;
+    }
+  }
+
+  private async extractBotBioLinks(username: string, searchId: number): Promise<string[]> {
+    try {
+      const input = await this.invokeWithTimeout(
+        this.client.getInputEntity(`@${username}`) as unknown as Promise<Api.TypeInputUser>,
+        15000,
+        'bot_bio_input_user'
+      );
+      const full = await this.invokeWithTimeout(
+        this.client.invoke(
+          new Api.users.GetFullUser({
+            id: input as any
+          } as any)
+        ),
+        15000,
+        'bot_bio_get_full_user'
+      );
+      const about = String((full as any)?.fullUser?.about || '');
+      if (!about.trim()) return [];
+      const links = this.collectTelegramLinks(about, [], undefined);
+      await this.logStep(searchId, 'iterative_bot_bio_links', { bot: username, links: links.length });
+      return links;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.logStep(searchId, 'iterative_bot_bio_links_error', { bot: username, error: message });
+      return [];
+    }
+  }
+
+  private async extractChatBioLinks(chat: Api.TypeChat, searchId: number): Promise<string[]> {
+    const chatAny = chat as any;
+    const chatType = String(chatAny?._ || '').toLowerCase();
+    const chatKey = this.getChatKey(chat);
+    try {
+      let about = '';
+      if (chatType.includes('channel')) {
+        const input = await this.invokeWithTimeout(
+          this.client.getInputEntity(chat) as unknown as Promise<Api.TypeInputChannel>,
+          15000,
+          'chat_bio_input_channel'
+        );
+        const full = await this.invokeWithTimeout(
+          this.client.invoke(
+            new Api.channels.GetFullChannel({
+              channel: input as any
+            } as any)
+          ),
+          15000,
+          'chat_bio_get_full_channel'
+        );
+        about = String((full as any)?.fullChat?.about || '');
+      } else if (chatType.includes('chat')) {
+        const chatId = Number(chatAny?.id || 0);
+        if (!Number.isFinite(chatId) || chatId <= 0) return [];
+        const full = await this.invokeWithTimeout(
+          this.client.invoke(
+            new Api.messages.GetFullChat({
+              chatId: chatId as any
+            } as any)
+          ),
+          15000,
+          'chat_bio_get_full_chat'
+        );
+        about = String((full as any)?.fullChat?.about || '');
+      } else {
+        return [];
+      }
+
+      if (!about.trim()) return [];
+      const links = this.collectTelegramLinks(about, [], undefined);
+      await this.logStep(searchId, 'iterative_chat_bio_links', { chat: chatKey, links: links.length });
+      return links;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.logStep(searchId, 'iterative_chat_bio_links_error', { chat: chatKey, error: message });
+      return [];
+    }
+  }
+
+  private async resolveParsedLinkForFrontier(params: {
+    parsed: ParsedTargetLink;
+    autoJoinInvites: boolean;
+    keywordTerms: string[];
+    searchId: number;
+    joinedPrivateChats: Map<string, Api.TypeChat>;
+  }): Promise<Api.TypeChat | null> {
+    const { parsed, autoJoinInvites, keywordTerms, searchId, joinedPrivateChats } = params;
+
+    let resolved: Api.TypeChat | null = null;
+    if (parsed.kind === 'invite') {
+      if (!autoJoinInvites) return null;
+      resolved = await this.joinInviteIfNeeded(parsed.canonical);
+      if (resolved) {
+        const joinedKey = this.getChatKey(resolved);
+        if (joinedKey) joinedPrivateChats.set(joinedKey, resolved);
+      }
+    } else {
+      resolved = await this.resolveChatFromParsedLink(parsed, autoJoinInvites);
+    }
+    if (!resolved) return null;
+
+    if (parsed.messageId) {
+      const targetHasKeyword = await this.targetMessageContainsKeyword(
+        resolved,
+        parsed.messageId,
+        keywordTerms
+      );
+      if (!targetHasKeyword) {
+        if (this.chatIdentityContainsKeyword(resolved, keywordTerms)) {
+          await this.logStep(searchId, 'iterative_link_target_keyword_fallback_identity', {
+            link: parsed.canonical,
+            messageId: parsed.messageId
+          });
+          return resolved;
+        }
+        await this.logStep(searchId, 'iterative_link_target_keyword_miss', {
+          link: parsed.canonical,
+          messageId: parsed.messageId
+        });
+        return null;
+      }
+    }
+
+    return resolved;
   }
 
   private isAccessDeniedError(errorMessage: string): boolean {
@@ -640,7 +1056,7 @@ export class SearchService {
   }
 
   private isBotUsernameLink(link: string): boolean {
-    const match = link.match(/^https:\/\/t\.me\/([A-Za-z0-9_]+)$/i);
+    const match = link.match(/^https:\/\/t\.me\/([A-Za-z0-9_]+)(?:[/?#].*)?$/i);
     return Boolean(match?.[1] && /bot$/i.test(match[1]));
   }
 
@@ -648,16 +1064,32 @@ export class SearchService {
     channelType?: string;
     channelLink?: string;
     messageLink?: string;
+    discoveredViaLink?: string;
     relatedLinks?: string[];
   }): string[] {
     const out = new Set<string>();
     if ((row.channelType || '').toLowerCase() === 'bot') {
       if (row.channelLink) out.add(row.channelLink);
-      return Array.from(out);
+    } else if (row.messageLink) {
+      out.add(row.messageLink);
     }
-    if (row.messageLink) out.add(row.messageLink);
+
+    const parsedVia = row.discoveredViaLink ? this.parseTargetLink(row.discoveredViaLink) : null;
+    if (
+      parsedVia
+      && (parsedVia.kind === 'invite'
+        || parsedVia.kind === 'public_chat'
+        || parsedVia.kind === 'private_chat'
+        || parsedVia.kind === 'bot')
+    ) {
+      out.add(parsedVia.canonical);
+    }
+
     for (const related of row.relatedLinks || []) {
-      if (this.isBotUsernameLink(related)) out.add(related);
+      const parsedRelated = this.parseTargetLink(related);
+      if (parsedRelated?.kind === 'bot') {
+        out.add(parsedRelated.canonical);
+      }
     }
     return Array.from(out);
   }
@@ -673,6 +1105,11 @@ export class SearchService {
       messageLink?: string;
       messageId: number;
       messageDate?: number;
+      matchReason?: 'keyword_hyperlink' | 'keyword_video';
+      iterationNo?: number;
+      discoveredViaLink?: string;
+      discoveredFromMessageLink?: string;
+      discoveredFromChannel?: string;
       messageText: string;
       relatedLinks: string[];
     },
@@ -688,6 +1125,11 @@ export class SearchService {
     const colDate = this.resolveTableColumn(meta, 'date');
     const colText = this.resolveTableColumn(meta, 'text');
     const colLinks = this.resolveTableColumn(meta, 'links');
+    const colMatchReason = this.resolveTableColumn(meta, 'match_reason');
+    const colIterationNo = this.resolveTableColumn(meta, 'iteration_no');
+    const colDiscoveredViaLink = this.resolveTableColumn(meta, 'discovered_via_link');
+    const colDiscoveredFromMessageLink = this.resolveTableColumn(meta, 'discovered_from_message_link');
+    const colDiscoveredFromChannel = this.resolveTableColumn(meta, 'discovered_from_channel');
     if (!colChannel || !colMessageId) return null;
 
     const values: Record<string, unknown> = {
@@ -711,6 +1153,11 @@ export class SearchService {
     }
     if (colDate) values[colDate] = row.messageDate ? new Date(row.messageDate) : new Date();
     if (colText) values[colText] = row.messageText;
+    if (colMatchReason) values[colMatchReason] = row.matchReason || null;
+    if (colIterationNo) values[colIterationNo] = Number.isFinite(row.iterationNo) ? row.iterationNo : null;
+    if (colDiscoveredViaLink) values[colDiscoveredViaLink] = row.discoveredViaLink || null;
+    if (colDiscoveredFromMessageLink) values[colDiscoveredFromMessageLink] = row.discoveredFromMessageLink || null;
+    if (colDiscoveredFromChannel) values[colDiscoveredFromChannel] = row.discoveredFromChannel || null;
     if (colLinks) {
       const includeMessageLinkInLinks = !colMessageLink;
       const payload = mode === 'extended'
@@ -867,6 +1314,7 @@ export class SearchService {
       const meta = await this.getSearchLinkTableMeta();
       const colSearchId = this.resolveSearchLinkTableColumn(meta, 'search_id');
       const colLink = this.resolveSearchLinkTableColumn(meta, 'link');
+      const colType = this.resolveSearchLinkTableColumn(meta, 'link_type');
       const colCreated = this.resolveSearchLinkTableColumn(meta, 'created_at');
       const colId = this.resolveSearchLinkTableColumn(meta, 'id');
       if (!colSearchId || !colLink) return [];
@@ -875,9 +1323,12 @@ export class SearchService {
       const orderClause = orderColumns.length
         ? ` ORDER BY ${orderColumns.map((c) => this.quoteIdentifier(c)).join(', ')}`
         : '';
+      const typeFilter = colType
+        ? ` AND (${this.quoteIdentifier(colType)} IS NULL OR LOWER(${this.quoteIdentifier(colType)}) <> 'related')`
+        : '';
       const sql = `SELECT ${this.quoteIdentifier(colLink)} AS LINK
         FROM ${meta.tableRef}
-        WHERE ${this.quoteIdentifier(colSearchId)} = :1${orderClause}`;
+        WHERE ${this.quoteIdentifier(colSearchId)} = :1${typeFilter}${orderClause}`;
       const rows = await this.searchLinkRepo.query(sql, [searchId]);
       return rows
         .map((row: any) => String(row?.LINK ?? row?.link ?? '').trim())
@@ -892,10 +1343,14 @@ export class SearchService {
     try {
       const meta = await this.getSearchLinkTableMeta();
       const colSearchId = this.resolveSearchLinkTableColumn(meta, 'search_id');
+      const colType = this.resolveSearchLinkTableColumn(meta, 'link_type');
       if (!colSearchId) return 0;
+      const typeFilter = colType
+        ? ` AND (${this.quoteIdentifier(colType)} IS NULL OR LOWER(${this.quoteIdentifier(colType)}) <> 'related')`
+        : '';
       const sql = `SELECT COUNT(*) AS CNT
         FROM ${meta.tableRef}
-        WHERE ${this.quoteIdentifier(colSearchId)} = :1`;
+        WHERE ${this.quoteIdentifier(colSearchId)} = :1${typeFilter}`;
       const rows = await this.searchLinkRepo.query(sql, [searchId]);
       const countValue = rows?.[0]?.CNT ?? rows?.[0]?.cnt ?? 0;
       const count = Number(countValue);
@@ -1020,13 +1475,14 @@ export class SearchService {
             channelType: row.channelType,
             channelLink: row.channelLink,
             messageLink: row.messageLink,
+            discoveredViaLink: row.discoveredViaLink,
             relatedLinks: row.relatedLinks
           });
           for (const link of clientLinks) {
             await this.upsertSearchLinkRow(
               searchIdFromRow,
               link,
-              row.channelType === 'bot' ? 'bot' : 'message',
+              this.classifyClientLinkType(link),
               matchId
             );
           }
@@ -1088,6 +1544,9 @@ export class SearchService {
     const startedAt = Date.now();
     const deadlineAt = startedAt + maxRuntimeMs;
     const autoJoinInvites = this.config.get<boolean>('crawlAutoJoin') !== false;
+    const joinPublicChannels = this.config.get<boolean>('crawlJoinPublic') === true;
+    const startBots = this.config.get<boolean>('crawlStartBots') === true;
+    const leaveJoinedPrivate = this.config.get<boolean>('crawlLeaveJoinedPrivate') !== false;
     const allowVideoCaptionWithoutLink = this.config.get<boolean>('crawlAllowVideoCaptionWithoutLink') !== false;
     const maxIterations = Math.max(
       1,
@@ -1110,6 +1569,10 @@ export class SearchService {
         const key = this.getChatKey(chat);
         if (key) seedChats.set(key, chat);
       }
+      for (const user of (byName as any).users || []) {
+        const key = this.getChatKey(user as Api.TypeChat);
+        if (key) seedChats.set(key, user as Api.TypeChat);
+      }
       await this.logStep(searchId, 'iterative_seed_contacts', { count: seedChats.size });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -1131,6 +1594,10 @@ export class SearchService {
       for (const chat of globalAny.chats || []) {
         const key = this.getChatKey(chat);
         if (key) seedChats.set(key, chat);
+      }
+      for (const user of globalAny.users || []) {
+        const key = this.getChatKey(user as Api.TypeChat);
+        if (key) seedChats.set(key, user as Api.TypeChat);
       }
       await this.logStep(searchId, 'iterative_seed_global', { count: seedChats.size });
     } catch (err) {
@@ -1180,9 +1647,11 @@ export class SearchService {
 
     const visitedChats = new Set<string>();
     const processedLinks = new Set<string>();
-    let frontier = Array.from(seedChats.values()).sort((a, b) =>
-      this.getChatKey(a).localeCompare(this.getChatKey(b))
-    );
+    const joinedPrivateChats = new Map<string, Api.TypeChat>();
+    const startedBots = new Set<string>();
+    let frontier: FrontierChatState[] = Array.from(seedChats.values())
+      .map((chat) => ({ chat }))
+      .sort((a, b) => this.getChatKey(a.chat).localeCompare(this.getChatKey(b.chat)));
     let chatsProcessed = 0;
     let messagesStored = 0;
     let iterations = 0;
@@ -1206,9 +1675,13 @@ export class SearchService {
         links: discoveredLinks.size
       });
 
-      const linksFromIteration = new Set<string>();
+      const linksFromIteration = new Map<string, {
+        discoveredFromMessageLink?: string;
+        discoveredFromChannel?: string;
+      }>();
 
-      for (const chat of frontier) {
+      for (const frontierItem of frontier) {
+        const chat = frontierItem.chat;
         if (Date.now() > deadlineAt) {
           await this.logStep(searchId, 'iterative_runtime_timeout_in_round', {
             maxRuntimeMs,
@@ -1223,6 +1696,8 @@ export class SearchService {
 
         const chatKey = this.getChatKey(chat);
         const chatUsername = this.getChatUsername(chat);
+        const chatChannelLink = this.buildChannelLink(chat);
+        const chatIdentityKeywordMatch = this.chatIdentityContainsKeyword(chat, keywordTerms);
         const selfPublicLink = chatUsername
           ? this.canonicalizeTelegramLink(`https://t.me/${chatUsername}`)
           : null;
@@ -1237,8 +1712,16 @@ export class SearchService {
         });
 
         let joinRetriedAfterAccessError = false;
-        if (canJoinChannel) {
+        if (canJoinChannel && joinPublicChannels) {
           await this.tryJoinChat(chat, searchId, 'iterative_chat_prejoin');
+        }
+
+        if (startBots && chatUsername && this.classifyChatType(chat) === 'bot') {
+          const botKey = chatUsername.toLowerCase();
+          if (!startedBots.has(botKey)) {
+            startedBots.add(botKey);
+            await this.startBotIfNeeded(chatUsername, undefined, searchId);
+          }
         }
 
         let inputPeer: Api.TypeInputPeer;
@@ -1289,7 +1772,12 @@ export class SearchService {
             );
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
-            if (this.isAccessDeniedError(message) && canJoinChannel && !joinRetriedAfterAccessError) {
+            if (
+              this.isAccessDeniedError(message)
+              && canJoinChannel
+              && joinPublicChannels
+              && !joinRetriedAfterAccessError
+            ) {
               joinRetriedAfterAccessError = true;
               const joined = await this.tryJoinChat(chat, searchId, 'iterative_chat_access');
               if (joined) {
@@ -1338,8 +1826,11 @@ export class SearchService {
           for (const msg of msgs) {
             const msgAny = msg as any;
             const text = String(msgAny.message || '');
-            if (!this.messageContainsKeyword(text, keywordTerms)) continue;
+            const messageKeywordMatch = this.messageContainsKeyword(text, keywordTerms);
+            if (!messageKeywordMatch && !chatIdentityKeywordMatch) continue;
 
+            const chatType = this.classifyChatType(chat);
+            const messageLink = this.buildMessageLink(chat, msgAny.id);
             const links = this.collectTelegramLinks(
               text,
               msgAny.entities || [],
@@ -1355,14 +1846,19 @@ export class SearchService {
             if (filteredLinks.length) {
               for (const normalized of filteredLinks) {
                 discoveredLinks.add(normalized);
-                linksFromIteration.add(normalized);
+                if (!linksFromIteration.has(normalized)) {
+                  linksFromIteration.set(normalized, {
+                    discoveredFromMessageLink: messageLink,
+                    discoveredFromChannel: chatChannelLink || chatKey
+                  });
+                }
                 if (this.isInviteLink(normalized)) discoveredInvites.add(normalized);
               }
             }
 
-            const chatType = this.classifyChatType(chat);
-            const channelLink = this.buildChannelLink(chat);
-            const messageLink = this.buildMessageLink(chat, msgAny.id);
+            const matchReason: 'keyword_hyperlink' | 'keyword_video' = filteredLinks.length
+              ? 'keyword_hyperlink'
+              : 'keyword_video';
 
             try {
               await this.redisStore.upsertMatch({
@@ -1371,11 +1867,16 @@ export class SearchService {
                 keyword,
                 channelKey: chatKey,
                 channelType: chatType,
-                channelLink,
+                channelLink: chatChannelLink,
                 messageId: msgAny.id,
                 messageLink,
                 messageText: text,
                 messageDate: Number(msgAny.date || 0) * 1000,
+                matchReason,
+                iterationNo: iterations,
+                discoveredViaLink: frontierItem.discoveredViaLink,
+                discoveredFromMessageLink: frontierItem.discoveredFromMessageLink,
+                discoveredFromChannel: frontierItem.discoveredFromChannel,
                 relatedLinks: filteredLinks
               });
             } catch (err) {
@@ -1389,7 +1890,7 @@ export class SearchService {
             }
 
             if (chatType === 'bot') {
-              if (channelLink) clientLinks.add(channelLink);
+              if (chatChannelLink) clientLinks.add(chatChannelLink);
             } else if (messageLink) {
               clientLinks.add(messageLink);
             }
@@ -1402,6 +1903,19 @@ export class SearchService {
           offsetId = lastId;
         }
 
+        const bioLinks = await this.extractChatBioLinks(chat, searchId);
+        for (const bioLink of bioLinks) {
+          if (selfPublicLink && bioLink === selfPublicLink) continue;
+          discoveredLinks.add(bioLink);
+          if (!linksFromIteration.has(bioLink)) {
+            linksFromIteration.set(bioLink, {
+              discoveredFromMessageLink: frontierItem.discoveredFromMessageLink,
+              discoveredFromChannel: chatChannelLink || chatKey
+            });
+          }
+          if (this.isInviteLink(bioLink)) discoveredInvites.add(bioLink);
+        }
+
         await this.logStep(searchId, 'iterative_chat_done', {
           iteration: iterations,
           chat: chatKey,
@@ -1410,19 +1924,80 @@ export class SearchService {
         });
       }
 
-      const nextFrontierMap = new Map<string, Api.TypeChat>();
-      for (const link of linksFromIteration) {
+      const nextFrontierMap = new Map<string, FrontierChatState>();
+      for (const [link, origin] of linksFromIteration.entries()) {
         if (processedLinks.has(link)) continue;
         processedLinks.add(link);
-        const resolved = await this.resolveChatFromLink(link, autoJoinInvites);
+        const parsed = this.parseTargetLink(link);
+        if (!parsed) continue;
+
+        if (parsed.kind === 'bot') {
+          clientLinks.add(parsed.canonical);
+          if (startBots && parsed.username) {
+            const botKey = parsed.username.toLowerCase();
+            if (!startedBots.has(botKey)) {
+              startedBots.add(botKey);
+              await this.startBotIfNeeded(parsed.username, parsed.botStartParam, searchId);
+            }
+          }
+          if (parsed.username) {
+            const botBioLinks = await this.extractBotBioLinks(parsed.username, searchId);
+            for (const botBioLink of botBioLinks) {
+              if (processedLinks.has(botBioLink)) continue;
+              processedLinks.add(botBioLink);
+              discoveredLinks.add(botBioLink);
+              clientLinks.add(botBioLink);
+              if (this.isInviteLink(botBioLink)) discoveredInvites.add(botBioLink);
+
+              const parsedBio = this.parseTargetLink(botBioLink);
+              if (!parsedBio) continue;
+              if (parsedBio.kind === 'bot') {
+                clientLinks.add(parsedBio.canonical);
+                continue;
+              }
+              const resolvedBio = await this.resolveParsedLinkForFrontier({
+                parsed: parsedBio,
+                autoJoinInvites,
+                keywordTerms,
+                searchId,
+                joinedPrivateChats
+              });
+              if (!resolvedBio) continue;
+
+              const bioKey = this.getChatKey(resolvedBio);
+              if (!bioKey || visitedChats.has(bioKey) || nextFrontierMap.has(bioKey)) continue;
+              nextFrontierMap.set(bioKey, {
+                chat: resolvedBio,
+                discoveredViaLink: parsedBio.canonical,
+                discoveredFromMessageLink: origin.discoveredFromMessageLink,
+                discoveredFromChannel: origin.discoveredFromChannel
+              });
+            }
+          }
+          continue;
+        }
+
+        const resolved = await this.resolveParsedLinkForFrontier({
+          parsed,
+          autoJoinInvites,
+          keywordTerms,
+          searchId,
+          joinedPrivateChats
+        });
         if (!resolved) continue;
+
         const key = this.getChatKey(resolved);
         if (!key || visitedChats.has(key) || nextFrontierMap.has(key)) continue;
-        nextFrontierMap.set(key, resolved);
+        nextFrontierMap.set(key, {
+          chat: resolved,
+          discoveredViaLink: parsed.canonical,
+          discoveredFromMessageLink: origin.discoveredFromMessageLink,
+          discoveredFromChannel: origin.discoveredFromChannel
+        });
       }
 
       frontier = Array.from(nextFrontierMap.values()).sort((a, b) =>
-        this.getChatKey(a).localeCompare(this.getChatKey(b))
+        this.getChatKey(a.chat).localeCompare(this.getChatKey(b.chat))
       );
 
       await this.logStep(searchId, 'iterative_round_done', {
@@ -1459,6 +2034,10 @@ export class SearchService {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.logger.warn('Redis store finalization failed', { searchRef, error: message });
+    }
+
+    if (leaveJoinedPrivate && joinedPrivateChats.size) {
+      await this.leaveJoinedPrivateChats(Array.from(joinedPrivateChats.values()), searchId);
     }
 
     return {

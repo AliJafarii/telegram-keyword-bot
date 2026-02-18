@@ -1,0 +1,9 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: telegram-keyword-bot
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: telegram-keyword-bot
