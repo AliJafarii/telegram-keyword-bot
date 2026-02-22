@@ -21,7 +21,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: bot
-          image: ghcr.io/alijafarii/telegram-keyword-bot:v2
+          image: docker.io/library/telegram-keyword-bot:k8s-local-v2
           imagePullPolicy: IfNotPresent
           command:
             - node

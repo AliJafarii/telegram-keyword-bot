@@ -374,11 +374,7 @@ export class BotService implements OnModuleInit {
     const usernameMatch = normalized.match(/^https:\/\/t\.me\/([A-Za-z0-9_]+)(?:[/?#].*)?$/i);
     if (!usernameMatch?.[1]) return null;
     if (!/bot$/i.test(usernameMatch[1])) return null;
-
-    if (!/[?#]/.test(normalized)) {
-      return normalized.replace(/\/+$/, '');
-    }
-    return normalized;
+    return `https://t.me/${usernameMatch[1]}`;
   }
 
   private parsePlainRootLink(link: string): string | null {
@@ -549,13 +545,36 @@ export class BotService implements OnModuleInit {
     });
   }
 
-  private async withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
-    return Promise.race([
-      promise,
-      new Promise<T>((_, reject) =>
-        setTimeout(() => reject(new Error(`${label} timeout after ${timeoutMs}ms`)), timeoutMs)
-      )
-    ]);
+  private async withTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    label: string,
+    onTimeout?: () => void
+  ): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const finish = (handler: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        handler();
+      };
+      const timer = setTimeout(() => {
+        if (onTimeout) {
+          try {
+            onTimeout();
+          } catch {
+            // ignore timeout hook failures
+          }
+        }
+        finish(() => reject(new Error(`${label} timeout after ${timeoutMs}ms`)));
+      }, timeoutMs);
+
+      promise.then(
+        (value) => finish(() => resolve(value)),
+        (err) => finish(() => reject(err))
+      );
+    });
   }
 
   private async createSearchRowOrThrow(params: {
@@ -607,10 +626,12 @@ export class BotService implements OnModuleInit {
   }): Promise<CrawlRunResult> {
     const { chatId, userId, keyword, maxIterations } = params;
     const dbOpTimeoutMs = Math.max(10000, Number(this.config.get<number>('dbOpTimeoutMs') || 120000));
-    const crawlTimeoutMs = Math.max(
-      120000,
-      Number(this.config.get<number>('crawlMaxRuntimeMs') || 300000) + 60000
+    const configuredCrawlRuntimeMs = Math.max(
+      60000,
+      Number(this.config.get<number>('crawlMaxRuntimeMs') || 300000)
     );
+    // Allow a grace window after crawl runtime for in-flight Telegram calls to settle.
+    const crawlTimeoutMs = Math.max(180000, configuredCrawlRuntimeMs + 300000);
 
     let searchRef = `tmp_${Date.now()}_${chatId}`;
     this.logger.log('Crawl job started', { chatId, userId, keyword, maxIterations, searchRef });
@@ -619,16 +640,27 @@ export class BotService implements OnModuleInit {
       const searchDbId = search.id;
       searchRef = String(searchDbId);
       this.logger.log('Search row created', { searchDbId, keyword, chatId });
+      const crawlAbortController = new AbortController();
 
       const crawl = await this.withTimeout(
         this.searchService.crawlKeywordIterative(
           keyword,
           searchDbId,
           maxIterations,
-          searchRef
+          searchRef,
+          { abortSignal: crawlAbortController.signal }
         ),
         crawlTimeoutMs,
-        'crawlKeywordIterative'
+        'crawlKeywordIterative',
+        () => {
+          crawlAbortController.abort(new Error(`crawlKeywordIterative timeout after ${crawlTimeoutMs}ms`));
+          this.logger.warn('Crawl timeout reached; abort requested', {
+            chatId,
+            keyword,
+            searchRef,
+            timeoutMs: crawlTimeoutMs
+          });
+        }
       );
       const resultLinks = crawl.clientLinks.length ? crawl.clientLinks : crawl.links;
       const displayLinks = this.filterClientMessageLinks(resultLinks);

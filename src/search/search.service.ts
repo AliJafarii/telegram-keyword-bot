@@ -51,6 +51,10 @@ interface ParsedTargetLink {
   messageId?: number;
 }
 
+interface CrawlRunOptions {
+  abortSignal?: AbortSignal;
+}
+
 @Injectable()
 export class SearchService {
   private readonly client: TelegramClient;
@@ -567,15 +571,21 @@ export class SearchService {
     return false;
   }
 
-  private async joinInviteIfNeeded(link: string): Promise<Api.TypeChat | null> {
+  private async joinInviteIfNeeded(link: string, abortSignal?: AbortSignal): Promise<Api.TypeChat | null> {
     const hash = this.parseInviteHash(link);
     if (!hash) return null;
     try {
-      const res: any = await this.client.invoke(
-        new Api.messages.ImportChatInvite({ hash } as any)
+      const res: any = await this.invokeWithTimeout(
+        this.client.invoke(
+          new Api.messages.ImportChatInvite({ hash } as any)
+        ),
+        15000,
+        'iterative_import_chat_invite',
+        abortSignal
       );
       if (res?.chats?.length) return res.chats[0] as Api.TypeChat;
     } catch (err) {
+      this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
       const message = err instanceof Error ? err.message : String(err);
       this.logger.warn('ImportChatInvite failed', { link, error: message });
     }
@@ -616,13 +626,19 @@ export class SearchService {
     return BigInt.asUintN(63, asBigInt);
   }
 
-  private async startBotIfNeeded(username: string, startParam: string | undefined, searchId: number): Promise<void> {
+  private async startBotIfNeeded(
+    username: string,
+    startParam: string | undefined,
+    searchId: number,
+    abortSignal?: AbortSignal
+  ): Promise<void> {
     const command = startParam ? `/start ${startParam}` : '/start';
     try {
       const peer = await this.invokeWithTimeout(
         this.client.getInputEntity(`@${username}`) as Promise<Api.TypeInputPeer>,
         15000,
-        'iterative_bot_start_input'
+        'iterative_bot_start_input',
+        abortSignal
       );
       await this.invokeWithTimeout(
         this.client.invoke(
@@ -634,13 +650,15 @@ export class SearchService {
           } as any)
         ),
         15000,
-        'iterative_bot_start_send'
+        'iterative_bot_start_send',
+        abortSignal
       );
       await this.logStep(searchId, 'iterative_bot_started', {
         bot: username,
         startParam: startParam || null
       });
     } catch (err) {
+      this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
       const message = err instanceof Error ? err.message : String(err);
       await this.logStep(searchId, 'iterative_bot_start_error', {
         bot: username,
@@ -652,16 +670,22 @@ export class SearchService {
 
   private async resolveChatFromParsedLink(
     parsed: ParsedTargetLink,
-    autoJoinInvites: boolean
+    autoJoinInvites: boolean,
+    abortSignal?: AbortSignal
   ): Promise<Api.TypeChat | null> {
     if (parsed.kind === 'invite') {
       if (!autoJoinInvites) return null;
-      return this.joinInviteIfNeeded(parsed.canonical);
+      return this.joinInviteIfNeeded(parsed.canonical, abortSignal);
     }
 
     if (parsed.username) {
       try {
-        return await this.client.getEntity(`@${parsed.username}`) as Api.TypeChat;
+        return await this.invokeWithTimeout(
+          this.client.getEntity(`@${parsed.username}`) as Promise<Api.TypeChat>,
+          15000,
+          'iterative_resolve_chat_by_username',
+          abortSignal
+        );
       } catch {
         return null;
       }
@@ -670,7 +694,12 @@ export class SearchService {
     if ((parsed.kind === 'private_message' || parsed.kind === 'private_chat') && parsed.privateChannelId) {
       try {
         const fullId = BigInt(`-100${parsed.privateChannelId}`);
-        return await this.client.getEntity(fullId as any) as Api.TypeChat;
+        return await this.invokeWithTimeout(
+          this.client.getEntity(fullId as any) as Promise<Api.TypeChat>,
+          15000,
+          'iterative_resolve_chat_by_private_id',
+          abortSignal
+        );
       } catch {
         return null;
       }
@@ -691,7 +720,8 @@ export class SearchService {
   private async targetMessageContainsKeyword(
     chat: Api.TypeChat,
     messageId: number,
-    keywordTerms: string[]
+    keywordTerms: string[],
+    abortSignal?: AbortSignal
   ): Promise<boolean> {
     if (!Number.isFinite(messageId) || messageId <= 0) return false;
     let inputPeer: Api.TypeInputPeer;
@@ -699,9 +729,11 @@ export class SearchService {
       inputPeer = await this.invokeWithTimeout(
         this.client.getInputEntity(chat) as Promise<Api.TypeInputPeer>,
         15000,
-        'target_message_input_peer'
+        'target_message_input_peer',
+        abortSignal
       );
     } catch {
+      this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
       return false;
     }
 
@@ -710,23 +742,26 @@ export class SearchService {
         inputPeer,
         messageId + 1,
         5,
-        15000
+        15000,
+        abortSignal
       );
       const exact = page.find((m) => Number((m as any)?.id || 0) === messageId);
       if (!exact) return false;
       const text = String((exact as any)?.message || '');
       return this.messageContainsKeyword(text, keywordTerms);
     } catch {
+      this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
       return false;
     }
   }
 
-  private async extractBotBioLinks(username: string, searchId: number): Promise<string[]> {
+  private async extractBotBioLinks(username: string, searchId: number, abortSignal?: AbortSignal): Promise<string[]> {
     try {
       const input = await this.invokeWithTimeout(
         this.client.getInputEntity(`@${username}`) as unknown as Promise<Api.TypeInputUser>,
         15000,
-        'bot_bio_input_user'
+        'bot_bio_input_user',
+        abortSignal
       );
       const full = await this.invokeWithTimeout(
         this.client.invoke(
@@ -735,7 +770,8 @@ export class SearchService {
           } as any)
         ),
         15000,
-        'bot_bio_get_full_user'
+        'bot_bio_get_full_user',
+        abortSignal
       );
       const about = String((full as any)?.fullUser?.about || '');
       if (!about.trim()) return [];
@@ -743,13 +779,18 @@ export class SearchService {
       await this.logStep(searchId, 'iterative_bot_bio_links', { bot: username, links: links.length });
       return links;
     } catch (err) {
+      this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
       const message = err instanceof Error ? err.message : String(err);
       await this.logStep(searchId, 'iterative_bot_bio_links_error', { bot: username, error: message });
       return [];
     }
   }
 
-  private async extractChatBioLinks(chat: Api.TypeChat, searchId: number): Promise<string[]> {
+  private async extractChatBioLinks(
+    chat: Api.TypeChat,
+    searchId: number,
+    abortSignal?: AbortSignal
+  ): Promise<string[]> {
     const chatAny = chat as any;
     const chatType = String(chatAny?._ || '').toLowerCase();
     const chatKey = this.getChatKey(chat);
@@ -759,7 +800,8 @@ export class SearchService {
         const input = await this.invokeWithTimeout(
           this.client.getInputEntity(chat) as unknown as Promise<Api.TypeInputChannel>,
           15000,
-          'chat_bio_input_channel'
+          'chat_bio_input_channel',
+          abortSignal
         );
         const full = await this.invokeWithTimeout(
           this.client.invoke(
@@ -768,7 +810,8 @@ export class SearchService {
             } as any)
           ),
           15000,
-          'chat_bio_get_full_channel'
+          'chat_bio_get_full_channel',
+          abortSignal
         );
         about = String((full as any)?.fullChat?.about || '');
       } else if (chatType.includes('chat')) {
@@ -781,7 +824,8 @@ export class SearchService {
             } as any)
           ),
           15000,
-          'chat_bio_get_full_chat'
+          'chat_bio_get_full_chat',
+          abortSignal
         );
         about = String((full as any)?.fullChat?.about || '');
       } else {
@@ -793,6 +837,7 @@ export class SearchService {
       await this.logStep(searchId, 'iterative_chat_bio_links', { chat: chatKey, links: links.length });
       return links;
     } catch (err) {
+      this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
       const message = err instanceof Error ? err.message : String(err);
       await this.logStep(searchId, 'iterative_chat_bio_links_error', { chat: chatKey, error: message });
       return [];
@@ -805,19 +850,27 @@ export class SearchService {
     keywordTerms: string[];
     searchId: number;
     joinedPrivateChats: Map<string, Api.TypeChat>;
+    abortSignal?: AbortSignal;
   }): Promise<Api.TypeChat | null> {
-    const { parsed, autoJoinInvites, keywordTerms, searchId, joinedPrivateChats } = params;
+    const {
+      parsed,
+      autoJoinInvites,
+      keywordTerms,
+      searchId,
+      joinedPrivateChats,
+      abortSignal
+    } = params;
 
     let resolved: Api.TypeChat | null = null;
     if (parsed.kind === 'invite') {
       if (!autoJoinInvites) return null;
-      resolved = await this.joinInviteIfNeeded(parsed.canonical);
+      resolved = await this.joinInviteIfNeeded(parsed.canonical, abortSignal);
       if (resolved) {
         const joinedKey = this.getChatKey(resolved);
         if (joinedKey) joinedPrivateChats.set(joinedKey, resolved);
       }
     } else {
-      resolved = await this.resolveChatFromParsedLink(parsed, autoJoinInvites);
+      resolved = await this.resolveChatFromParsedLink(parsed, autoJoinInvites, abortSignal);
     }
     if (!resolved) return null;
 
@@ -825,7 +878,8 @@ export class SearchService {
       const targetHasKeyword = await this.targetMessageContainsKeyword(
         resolved,
         parsed.messageId,
-        keywordTerms
+        keywordTerms,
+        abortSignal
       );
       if (!targetHasKeyword) {
         if (this.chatIdentityContainsKeyword(resolved, keywordTerms)) {
@@ -855,7 +909,12 @@ export class SearchService {
     return /USER_ALREADY_PARTICIPANT|INVITE_REQUEST_SENT|ALREADY/i.test(errorMessage);
   }
 
-  private async tryJoinChat(chat: Api.TypeChat, searchId: number, reason: string): Promise<boolean> {
+  private async tryJoinChat(
+    chat: Api.TypeChat,
+    searchId: number,
+    reason: string,
+    abortSignal?: AbortSignal
+  ): Promise<boolean> {
     const chatAny = chat as any;
     const chatType = String(chatAny?._ || '').toLowerCase();
     if (!chatType.includes('channel')) return false;
@@ -869,11 +928,13 @@ export class SearchService {
           } as any)
         ),
         15000,
-        `${reason}_join_channel`
+        `${reason}_join_channel`,
+        abortSignal
       );
       await this.logStep(searchId, 'iterative_chat_joined', { chat: chatKey, reason });
       return true;
     } catch (err) {
+      this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
       const message = err instanceof Error ? err.message : String(err);
       if (this.isAlreadyJoinedResult(message)) {
         await this.logStep(searchId, 'iterative_chat_join_ack', { chat: chatKey, reason, result: message });
@@ -888,7 +949,8 @@ export class SearchService {
     peer: Api.TypeInputPeer,
     offsetId: number,
     limit: number,
-    timeoutMs: number
+    timeoutMs: number,
+    abortSignal?: AbortSignal
   ): Promise<Api.Message[]> {
     const hist = await this.invokeWithTimeout(
       this.client.invoke(
@@ -903,19 +965,64 @@ export class SearchService {
         } as any)
       ),
       timeoutMs,
-      'iterative_chat_history_page'
+      'iterative_chat_history_page',
+      abortSignal
     );
     const histAny = hist as any;
     return (histAny.messages || []).filter((m: any) => Boolean(m?.message)) as Api.Message[];
   }
 
-  private async invokeWithTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
-    return Promise.race([
-      promise,
-      new Promise<T>((_, reject) =>
-        setTimeout(() => reject(new Error(`${label} timeout after ${timeoutMs}ms`)), timeoutMs)
-      )
-    ]);
+  private normalizeAbortReason(reason: unknown, label: string): Error {
+    if (reason instanceof Error) return reason;
+    const reasonText = typeof reason === 'string' && reason.trim() ? `: ${reason.trim()}` : '';
+    const err = new Error(`${label} aborted${reasonText}`);
+    err.name = 'AbortError';
+    return err;
+  }
+
+  private throwIfAborted(abortSignal: AbortSignal | undefined, label: string): void {
+    if (!abortSignal?.aborted) return;
+    throw this.normalizeAbortReason(abortSignal.reason, label);
+  }
+
+  private async invokeWithTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    label: string,
+    abortSignal?: AbortSignal
+  ): Promise<T> {
+    this.throwIfAborted(abortSignal, label);
+
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      let timer: NodeJS.Timeout | null = null;
+      const finish = (handler: () => void) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        if (abortSignal) {
+          abortSignal.removeEventListener('abort', onAbort);
+        }
+        handler();
+      };
+
+      const onAbort = () => {
+        finish(() => reject(this.normalizeAbortReason(abortSignal?.reason, label)));
+      };
+
+      if (abortSignal) {
+        abortSignal.addEventListener('abort', onAbort, { once: true });
+      }
+
+      timer = setTimeout(() => {
+        finish(() => reject(new Error(`${label} timeout after ${timeoutMs}ms`)));
+      }, timeoutMs);
+
+      promise.then(
+        (value) => finish(() => resolve(value)),
+        (err) => finish(() => reject(err))
+      );
+    });
   }
 
   private async logStep(searchId: number, step: string, details?: Record<string, unknown>) {
@@ -1060,6 +1167,20 @@ export class SearchService {
     return Boolean(match?.[1] && /bot$/i.test(match[1]));
   }
 
+  private toClientLinkFromParsedTarget(parsed: ParsedTargetLink): string | null {
+    switch (parsed.kind) {
+      case 'bot':
+      case 'invite':
+      case 'public_chat':
+      case 'private_chat':
+        return parsed.canonical;
+      case 'private_message':
+        return parsed.privateChannelId ? `https://t.me/c/${parsed.privateChannelId}` : null;
+      default:
+        return null;
+    }
+  }
+
   private buildClientLinksFromStoredRow(row: {
     channelType?: string;
     channelLink?: string;
@@ -1068,27 +1189,35 @@ export class SearchService {
     relatedLinks?: string[];
   }): string[] {
     const out = new Set<string>();
+    const parsedMessage = row.messageLink ? this.parseTargetLink(row.messageLink) : null;
+    const isPrivateMessage = parsedMessage?.kind === 'private_message';
+
     if ((row.channelType || '').toLowerCase() === 'bot') {
-      if (row.channelLink) out.add(row.channelLink);
+      const parsedChannel = row.channelLink ? this.parseTargetLink(row.channelLink) : null;
+      const botRoot = parsedChannel && parsedChannel.kind === 'bot'
+        ? parsedChannel.canonical
+        : null;
+      if (botRoot) out.add(botRoot);
     } else if (row.messageLink) {
       out.add(row.messageLink);
+      if (isPrivateMessage && parsedMessage.privateChannelId) {
+        out.add(`https://t.me/c/${parsedMessage.privateChannelId}`);
+      }
     }
 
-    const parsedVia = row.discoveredViaLink ? this.parseTargetLink(row.discoveredViaLink) : null;
-    if (
-      parsedVia
-      && (parsedVia.kind === 'invite'
-        || parsedVia.kind === 'public_chat'
-        || parsedVia.kind === 'private_chat'
-        || parsedVia.kind === 'bot')
-    ) {
-      out.add(parsedVia.canonical);
+    if (isPrivateMessage) {
+      const parsedVia = row.discoveredViaLink ? this.parseTargetLink(row.discoveredViaLink) : null;
+      if (parsedVia) {
+        const viaLink = this.toClientLinkFromParsedTarget(parsedVia);
+        if (viaLink) out.add(viaLink);
+      }
     }
 
     for (const related of row.relatedLinks || []) {
       const parsedRelated = this.parseTargetLink(related);
-      if (parsedRelated?.kind === 'bot') {
-        out.add(parsedRelated.canonical);
+      if (parsedRelated) {
+        const relatedLink = this.toClientLinkFromParsedTarget(parsedRelated);
+        if (relatedLink) out.add(relatedLink);
       }
     }
     return Array.from(out);
@@ -1508,9 +1637,13 @@ export class SearchService {
     keyword: string,
     searchId: number,
     maxIterationsArg?: number,
-    searchRefArg?: string
+    searchRefArg?: string,
+    options?: CrawlRunOptions
   ): Promise<KeywordCrawlResultDto> {
+    const abortSignal = options?.abortSignal;
+    this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
     await this.initUserClient();
+    this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
     const searchRef = searchRefArg || (searchId > 0 ? String(searchId) : `tmp_${Date.now()}`);
 
     const keywordTerms = this.splitKeywordTerms(keyword);
@@ -1562,8 +1695,13 @@ export class SearchService {
     await this.logStep(searchId, 'iterative_seed_start', { keyword, maxIterations });
 
     try {
-      const byName = await this.client.invoke(
-        new Api.contacts.Search({ q: keyword, limit: seedLimit })
+      const byName = await this.invokeWithTimeout(
+        this.client.invoke(
+          new Api.contacts.Search({ q: keyword, limit: seedLimit })
+        ),
+        20000,
+        'iterative_seed_contacts_search',
+        abortSignal
       );
       for (const chat of byName.chats || []) {
         const key = this.getChatKey(chat);
@@ -1575,20 +1713,26 @@ export class SearchService {
       }
       await this.logStep(searchId, 'iterative_seed_contacts', { count: seedChats.size });
     } catch (err) {
+      this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
       const message = err instanceof Error ? err.message : String(err);
       await this.logStep(searchId, 'iterative_seed_contacts_error', { error: message });
     }
 
     try {
-      const global = await this.client.invoke(
-        new Api.messages.SearchGlobal({
-          q: keyword,
-          offsetDate: 0 as any,
-          offsetPeer: new Api.InputPeerEmpty(),
-          offsetId: 0 as any,
-          limit: seedLimit,
-          filter: new Api.InputMessagesFilterEmpty()
-        } as any)
+      const global = await this.invokeWithTimeout(
+        this.client.invoke(
+          new Api.messages.SearchGlobal({
+            q: keyword,
+            offsetDate: 0 as any,
+            offsetPeer: new Api.InputPeerEmpty(),
+            offsetId: 0 as any,
+            limit: seedLimit,
+            filter: new Api.InputMessagesFilterEmpty()
+          } as any)
+        ),
+        20000,
+        'iterative_seed_global_search',
+        abortSignal
       );
       const globalAny = global as any;
       for (const chat of globalAny.chats || []) {
@@ -1601,6 +1745,7 @@ export class SearchService {
       }
       await this.logStep(searchId, 'iterative_seed_global', { count: seedChats.size });
     } catch (err) {
+      this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
       const message = err instanceof Error ? err.message : String(err);
       await this.logStep(searchId, 'iterative_seed_global_error', { error: message });
     }
@@ -1657,6 +1802,7 @@ export class SearchService {
     let iterations = 0;
 
     while (frontier.length && iterations < maxIterations && messagesStored < maxStored) {
+      this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
       if (Date.now() > deadlineAt) {
         await this.logStep(searchId, 'iterative_runtime_timeout', {
           maxRuntimeMs,
@@ -1681,6 +1827,7 @@ export class SearchService {
       }>();
 
       for (const frontierItem of frontier) {
+        this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
         const chat = frontierItem.chat;
         if (Date.now() > deadlineAt) {
           await this.logStep(searchId, 'iterative_runtime_timeout_in_round', {
@@ -1697,7 +1844,6 @@ export class SearchService {
         const chatKey = this.getChatKey(chat);
         const chatUsername = this.getChatUsername(chat);
         const chatChannelLink = this.buildChannelLink(chat);
-        const chatIdentityKeywordMatch = this.chatIdentityContainsKeyword(chat, keywordTerms);
         const selfPublicLink = chatUsername
           ? this.canonicalizeTelegramLink(`https://t.me/${chatUsername}`)
           : null;
@@ -1713,14 +1859,14 @@ export class SearchService {
 
         let joinRetriedAfterAccessError = false;
         if (canJoinChannel && joinPublicChannels) {
-          await this.tryJoinChat(chat, searchId, 'iterative_chat_prejoin');
+          await this.tryJoinChat(chat, searchId, 'iterative_chat_prejoin', abortSignal);
         }
 
         if (startBots && chatUsername && this.classifyChatType(chat) === 'bot') {
           const botKey = chatUsername.toLowerCase();
           if (!startedBots.has(botKey)) {
             startedBots.add(botKey);
-            await this.startBotIfNeeded(chatUsername, undefined, searchId);
+            await this.startBotIfNeeded(chatUsername, undefined, searchId, abortSignal);
           }
         }
 
@@ -1729,9 +1875,11 @@ export class SearchService {
           inputPeer = await this.invokeWithTimeout(
             this.client.getInputEntity(chat) as Promise<Api.TypeInputPeer>,
             15000,
-            'iterative_chat_input_peer'
+            'iterative_chat_input_peer',
+            abortSignal
           );
         } catch (err) {
+          this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
           const message = err instanceof Error ? err.message : String(err);
           await this.logStep(searchId, 'iterative_chat_input_peer_error', {
             chat: chatKey,
@@ -1745,6 +1893,7 @@ export class SearchService {
         let previousSig = '';
 
         while (pages < maxPagesPerChat && messagesStored < maxStored) {
+          this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
           if (Date.now() > deadlineAt) {
             await this.logStep(searchId, 'iterative_runtime_timeout_in_chat', {
               maxRuntimeMs,
@@ -1768,9 +1917,11 @@ export class SearchService {
               inputPeer,
               offsetId,
               pageSize,
-              15000
+              15000,
+              abortSignal
             );
           } catch (err) {
+            this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
             const message = err instanceof Error ? err.message : String(err);
             if (
               this.isAccessDeniedError(message)
@@ -1779,7 +1930,7 @@ export class SearchService {
               && !joinRetriedAfterAccessError
             ) {
               joinRetriedAfterAccessError = true;
-              const joined = await this.tryJoinChat(chat, searchId, 'iterative_chat_access');
+              const joined = await this.tryJoinChat(chat, searchId, 'iterative_chat_access', abortSignal);
               if (joined) {
                 await this.logStep(searchId, 'iterative_chat_retry_after_join', {
                   chat: chatKey,
@@ -1791,9 +1942,11 @@ export class SearchService {
                   inputPeer = await this.invokeWithTimeout(
                     this.client.getInputEntity(chat) as Promise<Api.TypeInputPeer>,
                     15000,
-                    'iterative_chat_input_peer_retry'
+                    'iterative_chat_input_peer_retry',
+                    abortSignal
                   );
                 } catch (retryErr) {
+                  this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
                   const retryMessage = retryErr instanceof Error ? retryErr.message : String(retryErr);
                   await this.logStep(searchId, 'iterative_chat_input_peer_retry_error', {
                     chat: chatKey,
@@ -1827,7 +1980,7 @@ export class SearchService {
             const msgAny = msg as any;
             const text = String(msgAny.message || '');
             const messageKeywordMatch = this.messageContainsKeyword(text, keywordTerms);
-            if (!messageKeywordMatch && !chatIdentityKeywordMatch) continue;
+            if (!messageKeywordMatch) continue;
 
             const chatType = this.classifyChatType(chat);
             const messageLink = this.buildMessageLink(chat, msgAny.id);
@@ -1903,7 +2056,7 @@ export class SearchService {
           offsetId = lastId;
         }
 
-        const bioLinks = await this.extractChatBioLinks(chat, searchId);
+        const bioLinks = await this.extractChatBioLinks(chat, searchId, abortSignal);
         for (const bioLink of bioLinks) {
           if (selfPublicLink && bioLink === selfPublicLink) continue;
           discoveredLinks.add(bioLink);
@@ -1926,6 +2079,7 @@ export class SearchService {
 
       const nextFrontierMap = new Map<string, FrontierChatState>();
       for (const [link, origin] of linksFromIteration.entries()) {
+        this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
         if (processedLinks.has(link)) continue;
         processedLinks.add(link);
         const parsed = this.parseTargetLink(link);
@@ -1937,11 +2091,11 @@ export class SearchService {
             const botKey = parsed.username.toLowerCase();
             if (!startedBots.has(botKey)) {
               startedBots.add(botKey);
-              await this.startBotIfNeeded(parsed.username, parsed.botStartParam, searchId);
+              await this.startBotIfNeeded(parsed.username, parsed.botStartParam, searchId, abortSignal);
             }
           }
           if (parsed.username) {
-            const botBioLinks = await this.extractBotBioLinks(parsed.username, searchId);
+            const botBioLinks = await this.extractBotBioLinks(parsed.username, searchId, abortSignal);
             for (const botBioLink of botBioLinks) {
               if (processedLinks.has(botBioLink)) continue;
               processedLinks.add(botBioLink);
@@ -1960,7 +2114,8 @@ export class SearchService {
                 autoJoinInvites,
                 keywordTerms,
                 searchId,
-                joinedPrivateChats
+                joinedPrivateChats,
+                abortSignal
               });
               if (!resolvedBio) continue;
 
@@ -1982,7 +2137,8 @@ export class SearchService {
           autoJoinInvites,
           keywordTerms,
           searchId,
-          joinedPrivateChats
+          joinedPrivateChats,
+          abortSignal
         });
         if (!resolved) continue;
 

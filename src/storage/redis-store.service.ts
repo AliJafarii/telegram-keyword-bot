@@ -121,10 +121,7 @@ export class RedisStoreService implements OnModuleInit, OnModuleDestroy {
 
     const usernameMatch = normalized.match(/^https:\/\/t\.me\/([A-Za-z0-9_]+)(?:[/?#].*)?$/i);
     if (!usernameMatch?.[1] || !/bot$/i.test(usernameMatch[1])) return null;
-    if (!/[?#]/.test(normalized)) {
-      return normalized.replace(/\/+$/, '');
-    }
-    return normalized;
+    return `https://t.me/${usernameMatch[1]}`;
   }
 
   private parseInviteOrRootLink(link: string): string | null {
@@ -138,6 +135,8 @@ export class RedisStoreService implements OnModuleInit, OnModuleDestroy {
 
     const privateRoot = normalized.match(/^https:\/\/t\.me\/c\/(\d+)\/?(?:[?#].*)?$/i);
     if (privateRoot?.[1]) return `https://t.me/c/${privateRoot[1]}`;
+    const privateMsg = normalized.match(/^https:\/\/t\.me\/c\/(\d+)\/\d+(?:[/?#].*)?$/i);
+    if (privateMsg?.[1]) return `https://t.me/c/${privateMsg[1]}`;
 
     if (/^https:\/\/t\.me\/(?:s\/)?[A-Za-z0-9_]+\/\d+/i.test(normalized)) return null;
 
@@ -222,14 +221,21 @@ export class RedisStoreService implements OnModuleInit, OnModuleDestroy {
       } else {
         const messageLink = row.messageLink ? this.parseMessageLink(row.messageLink) : null;
         if (messageLink) out.add(messageLink);
-      }
 
-      const discoveredVia = row.discoveredViaLink ? this.parseInviteOrRootLink(row.discoveredViaLink) : null;
-      if (discoveredVia) out.add(discoveredVia);
+        const privateRootFromMessage = row.messageLink ? this.parseInviteOrRootLink(row.messageLink) : null;
+        if (privateRootFromMessage) out.add(privateRootFromMessage);
+
+        if (/^https:\/\/t\.me\/c\//i.test(messageLink || '')) {
+          const discoveredVia = row.discoveredViaLink ? this.parseInviteOrRootLink(row.discoveredViaLink) : null;
+          if (discoveredVia) out.add(discoveredVia);
+        }
+      }
 
       for (const related of row.relatedLinks || []) {
         const botLink = this.parseBotLink(related);
         if (botLink) out.add(botLink);
+        const inviteOrRoot = this.parseInviteOrRootLink(related);
+        if (inviteOrRoot) out.add(inviteOrRoot);
       }
     }
     return Array.from(out);
