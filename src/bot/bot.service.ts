@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { Markup, Telegraf } from 'telegraf';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import { ConfigService } from '@nestjs/config';
@@ -52,7 +52,7 @@ interface KeywordSheetBatch {
 type ChatInputMode = 'keyword' | 'excel';
 
 @Injectable()
-export class BotService implements OnModuleInit {
+export class BotService implements OnModuleInit, OnModuleDestroy {
   private readonly bot: Telegraf;
   private readonly maxMessageLen = 4000;
   private readonly runningChats = new Set<number>();
@@ -61,6 +61,9 @@ export class BotService implements OnModuleInit {
   private readonly pendingInputMode = new Map<number, ChatInputMode>();
   private readonly menuSearchOneKeyword = 'Search One Keyword';
   private readonly menuImportExcel = 'Import Excel File';
+  private botLaunchLoop?: Promise<void>;
+  private botLaunchAttempts = 0;
+  private botShutdownRequested = false;
   private readonly mainMenuKeyboard = Markup.keyboard(
     [[this.menuSearchOneKeyword], [this.menuImportExcel]]
   ).resize();
@@ -118,14 +121,18 @@ export class BotService implements OnModuleInit {
       this.logger.error('Bot error', message);
     });
 
-    this.bot.launch({ dropPendingUpdates: true })
-      .then(() => this.logger.log('Bot launched'))
-      .catch((err) => {
-        const message = err instanceof Error ? err.message : String(err);
-        this.logger.error('Bot launch failed', message);
-      });
+    this.ensureBotLaunchLoop();
+  }
 
-    this.logger.log('Bot launch requested');
+  async onModuleDestroy() {
+    this.botShutdownRequested = true;
+    try {
+      this.bot.stop('shutdown');
+      this.logger.log('Bot stopped');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.warn('Bot stop failed', { error: message });
+    }
   }
 
   private registerHandlers() {
@@ -199,6 +206,54 @@ export class BotService implements OnModuleInit {
         msgId
       );
     });
+  }
+
+  private ensureBotLaunchLoop() {
+    if (this.botLaunchLoop) return;
+    this.botLaunchLoop = this.runBotLaunchLoop()
+      .catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        this.logger.error('Bot launch loop crashed', message);
+      })
+      .finally(() => {
+        this.botLaunchLoop = undefined;
+      });
+  }
+
+  private async runBotLaunchLoop() {
+    while (!this.botShutdownRequested) {
+      const attempt = this.botLaunchAttempts + 1;
+      const dropPendingUpdates = this.botLaunchAttempts === 0;
+      this.logger.log('Bot launch requested', { attempt, dropPendingUpdates });
+
+      try {
+        await this.bot.launch({ dropPendingUpdates });
+        this.logger.log('Bot launched');
+        this.botLaunchAttempts = 0;
+        return;
+      } catch (err) {
+        if (this.botShutdownRequested) return;
+
+        const message = err instanceof Error ? err.message : String(err);
+        const retryMs = this.getBotLaunchRetryDelayMs(message, this.botLaunchAttempts);
+        this.botLaunchAttempts += 1;
+
+        this.logger.error('Bot launch failed', message);
+        this.logger.warn('Bot relaunch scheduled', {
+          attempt: this.botLaunchAttempts + 1,
+          retryMs
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, retryMs));
+      }
+    }
+  }
+
+  private getBotLaunchRetryDelayMs(message: string, attempts: number) {
+    if (/terminated by other getUpdates request/i.test(message) || /409:\s*Conflict/i.test(message)) {
+      return 15000;
+    }
+    return Math.min(60000, 5000 * (attempts + 1));
   }
 
   private parseKeywordAndIterations(rawInput: string, fromCommand: boolean): { keyword: string; iterations?: number } {
