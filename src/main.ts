@@ -10,8 +10,9 @@ async function bootstrap() {
   logger.log('App bootstrap starting');
   app.enableShutdownHooks();
   const port = Number(process.env.PORT || 3000);
-  await app.listen(port, '0.0.0.0');
-  logger.log('Bot application initialized', { port });
+  const host = process.env.HOST || '127.0.0.1';
+  await app.listen(port, host);
+  logger.log('Bot application initialized', { host, port });
 }
 
 bootstrap().catch((err) => {

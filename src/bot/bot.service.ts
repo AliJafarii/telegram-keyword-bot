@@ -1,15 +1,24 @@
+Total output lines: 1522
+
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { Markup, Telegraf } from 'telegraf';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { execFile } from 'child_process';
+import { mkdtemp, readFile, rm, writeFile } from 'fs/promises';
+import { basename, extname, join } from 'path';
+import { tmpdir } from 'os';
+import { promisify } from 'util';
+import ExcelJS from 'exceljs';
 import { LoggerService } from '../common/logger.service';
 import { KeywordCrawlResultDto, SearchService } from '../search/search.service';
 import { UserEntity } from '../entities/user.entity';
 import { SearchEntity } from '../entities/search.entity';
 import { RedisStoreService } from '../storage/redis-store.service';
-import * as XLSX from 'xlsx';
+
+const execFileAsync = promisify(execFile);
 
 type ResultSource = 'web' | 'telegram' | 'links';
 
@@ -58,9 +67,10 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   private readonly runningChats = new Set<number>();
   private readonly inMemoryResults = new Map<string, InMemorySearchResult>();
   private readonly inMemoryTtlMs = 12 * 60 * 60 * 1000;
+  private readonly cachedSearchTtlMs = 7 * 24 * 60 * 60 * 1000;
   private readonly pendingInputMode = new Map<number, ChatInputMode>();
-  private readonly menuSearchOneKeyword = 'Search One Keyword';
-  private readonly menuImportExcel = 'Import Excel File';
+  private readonly menuSearchOneKeyword = 'جستجوی یک کلمه';
+  private readonly menuImportExcel = 'ارسال فایل اکسل';
   private botLaunchLoop?: Promise<void>;
   private botLaunchAttempts = 0;
   private botShutdownRequested = false;
@@ -108,7 +118,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
     try {
       await this.bot.telegram.setMyCommands([
-        { command: 'start', description: 'Open main menu' }
+        { command: 'start', description: 'نمایش منوی اصلی' }
       ]);
       this.logger.log('Bot commands updated');
     } catch (err) {
@@ -147,7 +157,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         this.pendingInputMode.delete(ctx.chat.id);
       }
       return ctx.reply(
-        '👋 Welcome! Choose one option from menu:',
+        'سلام 👋 یکی از گزینه‌های منو را انتخاب کن.',
         this.mainMenuKeyboard
       );
     });
@@ -161,23 +171,23 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
       if (text === this.menuSearchOneKeyword) {
         this.pendingInputMode.set(chatId, 'keyword');
-        return ctx.reply('🔎 Send one keyword to start crawling.', this.mainMenuKeyboard);
+        return ctx.reply('لطفاً یک کلمه یا عبارت بفرست تا سریع جستجو کنم.', this.mainMenuKeyboard);
       }
 
       if (text === this.menuImportExcel) {
         this.pendingInputMode.set(chatId, 'excel');
-        return ctx.reply('📄 Send an Excel file (.xlsx/.xls) with one keyword per row.', this.mainMenuKeyboard);
+        return ctx.reply('لطفاً فایل اکسل را بفرست؛ هر ردیف باید یک کلمه داشته باشد.', this.mainMenuKeyboard);
       }
 
       const mode = this.pendingInputMode.get(chatId);
       if (mode === 'excel') {
-        return ctx.reply('📄 You selected Excel mode. Please upload .xlsx/.xls file.', this.mainMenuKeyboard);
+        return ctx.reply('حالت اکسل فعال است؛ لطفاً فایل با پسوند xlsx یا xls بفرست.', this.mainMenuKeyboard);
       }
       if (mode === 'keyword') {
         this.pendingInputMode.delete(chatId);
       } else {
         return ctx.reply(
-          'Choose one option from menu first.',
+          'لطفاً اول از منو مشخص کن می‌خواهی جستجوی تکی انجام بدی یا فایل اکسل بفرستی.',
           this.mainMenuKeyboard
         );
       }
@@ -325,27 +335,50 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     return Number.isNaN(id) ? null : id;
   }
 
-  private parseKeywordRowsFromWorksheet(sheet: XLSX.WorkSheet): string[] {
-    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, blankrows: false }) as Array<Array<unknown>>;
-    const out: string[] = [];
-    for (const row of rows) {
-      if (!Array.isArray(row) || !row.length) continue;
-      const firstCell = row.find((cell) =>
-        typeof cell === 'string' || typeof cell === 'number'
-      );
-      if (firstCell === undefined || firstCell === null) continue;
-      const keyword = String(firstCell).trim();
-      if (!keyword) continue;
-      out.push(keyword);
+  private getCellText(cell: ExcelJS.Cell): string {
+    const value = cell.value;
+    if (value === null || value === undefined) return '';
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      return String(value).trim();
     }
+    if (value instanceof Date) return value.toISOString();
+    if (typeof value === 'object') {
+      const textValue = (value as { text?: unknown }).text;
+      if (typeof textValue === 'string') return textValue.trim();
+
+      const resultValue = (value as { result?: unknown }).result;
+      if (
+        typeof resultValue === 'string' ||
+        typeof resultValue === 'number' ||
+        typeof resultValue === 'boolean'
+      ) {
+        return String(resultValue).trim();
+      }
+
+      const richText = (value as { richText?: Array<{ text?: string }> }).richText;
+      if (Array.isArray(richText)) {
+        return richText.map((part) => part.text || '').join('').trim();
+      }
+    }
+    return cell.text.trim();
+  }
+
+  private parseKeywordRowsFromWorksheet(sheet: ExcelJS.Worksheet): string[] {
+    const out: string[] = [];
+    sheet.eachRow({ includeEmpty: false }, (row) => {
+      let keyword = '';
+      row.eachCell({ includeEmpty: false }, (cell) => {
+        if (keyword) return;
+        keyword = this.getCellText(cell);
+      });
+      if (keyword) out.push(keyword);
+    });
     return out;
   }
 
-  private extractKeywordBatchesFromWorkbook(workbook: XLSX.WorkBook): KeywordSheetBatch[] {
+  private extractKeywordBatchesFromWorkbook(workbook: ExcelJS.Workbook): KeywordSheetBatch[] {
     const out: KeywordSheetBatch[] = [];
-    for (const sheetName of workbook.SheetNames || []) {
-      const sheet = workbook.Sheets[sheetName];
-      if (!sheet) continue;
+    for (const sheet of workbook.worksheets || []) {
       const sheetKeywords = this.parseKeywordRowsFromWorksheet(sheet);
       if (!sheetKeywords.length) continue;
       const dedupe = new Set<string>();
@@ -353,11 +386,55 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       const keywords = Array.from(dedupe);
       if (!keywords.length) continue;
       out.push({
-        inputSheetName: sheetName,
+        inputSheetName: sheet.name,
         keywords
       });
     }
     return out;
+  }
+
+  private tempExcelFileName(fileName: string): string {
+    const ext = extname(fileName).toLowerCase() === '.xls' ? '.xls' : '.xlsx';
+    const base = basename(fileName, extname(fileName))
+      .replace(/[^A-Za-z0-9._-]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .slice(0, 64);
+    return `${base || 'input'}${ext}`;
+  }
+
+  private async convertLegacyExcelToXlsx(content: Buffer, fileName: string): Promise<Buffer> {
+    const tmpDir = await mkdtemp(join(tmpdir(), 'telegram-keyword-bot-excel-'));
+    const inputName = this.tempExcelFileName(fileName);
+    const inputPath = join(tmpDir, inputName);
+    const outputPath = join(tmpDir, `${basename(inputName, extname(inputName))}.xlsx`);
+
+    try {
+      await writeFile(inputPath, content);
+      await execFileAsync(
+        'libreoffice',
+        ['--headless', '--convert-to', 'xlsx', '--outdir', tmpDir, inputPath],
+        { timeout: 30000, maxBuffer: 1024 * 1024 }
+      );
+      return await readFile(outputPath);
+    } catch (err) {
+      const errWithStderr = err as Error & { code?: string; stderr?: string };
+      if (errWithStderr.code === 'ENOENT') {
+        throw new Error('LibreOffice is required to read legacy .xls files but was not found on this server.');
+      }
+      const stderr = errWithStderr.stderr?.trim();
+      throw new Error(`Failed to convert .xls file to .xlsx${stderr ? `: ${stderr}` : ''}`);
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
+  private async loadExcelWorkbook(content: Buffer, fileName: string): Promise<ExcelJS.Workbook> {
+    const workbook = new ExcelJS.Workbook();
+    const workbookContent = fileName.endsWith('.xls')
+      ? await this.convertLegacyExcelToXlsx(content, fileName)
+      : content;
+    await workbook.xlsx.load(workbookContent as unknown as Parameters<ExcelJS.Xlsx['load']>[0]);
+    return workbook;
   }
 
   private sanitizeSheetName(name: string, fallbackIndex: number): string {
@@ -475,380 +552,29 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
   private filterClientBotLinks(rawLinks: string[]): string[] {
     const dedupe = new Map<string, string>();
-    for (const raw of rawLinks) {
-      const parsed = this.parseBotLink(raw);
-      if (!parsed) continue;
-      dedupe.set(parsed.toLowerCase(), parsed);
-    }
-    return Array.from(dedupe.values()).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
-  }
-
-  private filterClientPlainRootLinks(rawLinks: string[]): string[] {
-    const dedupe = new Map<string, string>();
-    for (const raw of rawLinks) {
-      const parsed = this.parsePlainRootLink(raw);
-      if (!parsed) continue;
-      dedupe.set(parsed.toLowerCase(), parsed);
-    }
-    return Array.from(dedupe.values()).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
-  }
-
-  private splitInviteAndRootLinks(links: string[]): { inviteLinks: string[]; rootLinks: string[] } {
-    const inviteLinks: string[] = [];
-    const rootLinks: string[] = [];
-    for (const link of links) {
-      if (/^https:\/\/t\.me\/\+/i.test(link) || /^https:\/\/t\.me\/joinchat\//i.test(link)) {
-        inviteLinks.push(link);
-      } else {
-        rootLinks.push(link);
-      }
-    }
-    return { inviteLinks, rootLinks };
-  }
-
-  private groupClientMessageLinks(items: ParsedMessageLink[]): GroupedChannelLinks[] {
-    const grouped = new Map<string, ParsedMessageLink[]>();
-    for (const item of items) {
-      if (!grouped.has(item.channelId)) grouped.set(item.channelId, []);
-      grouped.get(item.channelId)!.push(item);
-    }
-
-    return Array.from(grouped.entries())
-      .map(([channelId, entries]) => ({
-        channelId,
-        links: entries
-          .sort((a, b) => a.uid - b.uid)
-          .map((entry) => entry.link)
-      }))
-      .sort((a, b) => a.channelId.localeCompare(b.channelId, undefined, { sensitivity: 'base' }));
-  }
-
-  private buildExportRows(links: string[], sourceKeyword?: string): ExportLinkRow[] {
-    const rows = new Map<string, ExportLinkRow>();
-
-    for (const raw of links) {
-      const message = this.parseMessageLink(raw);
-      if (message) {
-        rows.set(message.link, {
-          keyword: sourceKeyword,
-          type: 'message',
-          channel: message.channelId,
-          uid: String(message.uid),
-          link: message.link
-        });
-        continue;
-      }
-
-      const bot = this.parseBotLink(raw);
-      if (bot) {
-        const usernameMatch = bot.match(/^https:\/\/t\.me\/([A-Za-z0-9_]+)/i);
-        rows.set(bot, {
-          keyword: sourceKeyword,
-          type: 'bot',
-          channel: usernameMatch?.[1] || '',
-          uid: '',
-          link: bot
-        });
-        continue;
-      }
-
-      const root = this.parsePlainRootLink(raw);
-      if (!root) continue;
-
-      if (/^https:\/\/t\.me\/c\/\d+$/i.test(root)) {
-        const match = root.match(/^https:\/\/t\.me\/c\/(\d+)$/i);
-        rows.set(root, {
-          keyword: sourceKeyword,
-          type: 'private_root',
-          channel: match?.[1] || '',
-          uid: '',
-          link: root
-        });
-        continue;
-      }
-      if (/^https:\/\/t\.me\/\+/i.test(root) || /^https:\/\/t\.me\/joinchat\//i.test(root)) {
-        rows.set(root, {
-          keyword: sourceKeyword,
-          type: 'invite',
-          channel: '',
-          uid: '',
-          link: root
-        });
-        continue;
-      }
-
-      const usernameMatch = root.match(/^https:\/\/t\.me\/([A-Za-z0-9_]+)$/i);
-      rows.set(root, {
-        keyword: sourceKeyword,
-        type: 'chat_root',
-        channel: usernameMatch?.[1] || '',
-        uid: '',
-        link: root
-      });
-    }
-
-    return Array.from(rows.values()).sort((a, b) => {
-      const t = a.type.localeCompare(b.type, undefined, { sensitivity: 'base' });
-      if (t !== 0) return t;
-      const c = a.channel.localeCompare(b.channel, undefined, { sensitivity: 'base' });
-      if (c !== 0) return c;
-      const k = (a.keyword || '').localeCompare(b.keyword || '', undefined, { sensitivity: 'base' });
-      if (k !== 0) return k;
-      const u = a.uid.localeCompare(b.uid, undefined, { sensitivity: 'base' });
-      if (u !== 0) return u;
-      return a.link.localeCompare(b.link, undefined, { sensitivity: 'base' });
-    });
-  }
-
-  private async withTimeout<T>(
-    promise: Promise<T>,
-    timeoutMs: number,
-    label: string,
-    onTimeout?: () => void
-  ): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-      let settled = false;
-      const finish = (handler: () => void) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        handler();
-      };
-      const timer = setTimeout(() => {
-        if (onTimeout) {
-          try {
-            onTimeout();
-          } catch {
-            // ignore timeout hook failures
-          }
-        }
-        finish(() => reject(new Error(`${label} timeout after ${timeoutMs}ms`)));
-      }, timeoutMs);
-
-      promise.then(
-        (value) => finish(() => resolve(value)),
-        (err) => finish(() => reject(err))
-      );
-    });
-  }
-
-  private async createSearchRowOrThrow(params: {
-    userId: number;
-    keyword: string;
-    chatId: number;
-  }): Promise<SearchEntity> {
-    const { userId, keyword, chatId } = params;
-    const timeoutMs = Math.max(1000, Number(this.config.get<number>('searchCreateTimeoutMs') || 5000));
-    const maxAttempts = Math.max(1, Number(this.config.get<number>('searchCreateMaxAttempts') || 3));
-    let lastError: string | null = null;
-
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      try {
-        const row = await this.withTimeout(
-          this.searchRepo.save({
-            user_id: userId,
-            keyword
-          }),
-          timeoutMs,
-          `search_row_create_attempt_${attempt}`
-        );
-        if (attempt > 1) {
-          this.logger.log('Search row create succeeded after retry', { chatId, keyword, attempt, searchId: row.id });
-        }
-        return row;
-      } catch (err) {
-        lastError = err instanceof Error ? err.message : String(err);
-        this.logger.warn('Search row create attempt failed', {
-          chatId,
-          keyword,
-          attempt,
-          maxAttempts,
-          error: lastError
-        });
-      }
-    }
-
-    throw new Error(
-      `search_row_create failed after ${maxAttempts} attempt(s): ${lastError || 'unknown error'}`
-    );
-  }
-
-  private async runCrawlAndPersist(params: {
-    chatId: number;
-    userId: number;
-    keyword: string;
-    maxIterations: number;
-  }): Promise<CrawlRunResult> {
-    const { chatId, userId, keyword, maxIterations } = params;
-    const dbOpTimeoutMs = Math.max(10000, Number(this.config.get<number>('dbOpTimeoutMs') || 120000));
-    const configuredCrawlRuntimeMs = Math.max(
-      60000,
-      Number(this.config.get<number>('crawlMaxRuntimeMs') || 300000)
-    );
-    // Allow a grace window after crawl runtime for in-flight Telegram calls to settle.
-    const crawlTimeoutMs = Math.max(180000, configuredCrawlRuntimeMs + 300000);
-
-    let searchRef = `tmp_${Date.now()}_${chatId}`;
-    this.logger.log('Crawl job started', { chatId, userId, keyword, maxIterations, searchRef });
-    try {
-      const search = await this.createSearchRowOrThrow({ userId, keyword, chatId });
-      const searchDbId = search.id;
-      searchRef = String(searchDbId);
-      this.logger.log('Search row created', { searchDbId, keyword, chatId });
-      const crawlAbortController = new AbortController();
-
-      const crawl = await this.withTimeout(
-        this.searchService.crawlKeywordIterative(
-          keyword,
-          searchDbId,
-          maxIterations,
-          searchRef,
-          { abortSignal: crawlAbortController.signal }
-        ),
-        crawlTimeoutMs,
-        'crawlKeywordIterative',
-        () => {
-          crawlAbortController.abort(new Error(`crawlKeywordIterative timeout after ${crawlTimeoutMs}ms`));
-          this.logger.warn('Crawl timeout reached; abort requested', {
-            chatId,
-            keyword,
-            searchRef,
-            timeoutMs: crawlTimeoutMs
-          });
-        }
-      );
-      const resultLinks = crawl.clientLinks.length ? crawl.clientLinks : crawl.links;
-      const displayLinks = this.filterClientMessageLinks(resultLinks);
-      this.setInMemoryLinks(searchRef, resultLinks);
-      this.logger.log('Crawl job completed', {
-        searchRef,
+    for (const raw of rawLinks…4301 tokens truncated… (cachedSearch) {
+      const cachedLinks = await this.getCachedSearchLinks(cachedSearch);
+      this.logger.log('Serving keyword from cached search results', {
         chatId,
         keyword,
-        iterations: crawl.iterations,
-        chatsProcessed: crawl.chatsProcessed,
-        messagesStored: crawl.messagesStored,
-        linksFound: resultLinks.length,
-        displayLinks: displayLinks.length
+        cachedSearchId: cachedSearch.id,
+        cachedLinks: cachedLinks.length
       });
-
-      try {
-        await this.withTimeout(
-          this.searchRepo.update(searchDbId, {
-            results_links: JSON.stringify(resultLinks),
-            results_invites: JSON.stringify(crawl.invites)
-          }),
-          dbOpTimeoutMs,
-          'search_row_update'
-        );
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        this.logger.warn('Search row update failed; using in-memory results', { searchDbId, error: message });
-      }
-
-      try {
-        const persisted = await this.withTimeout(
-          this.searchService.persistMatchesToOracle(searchRef),
-          dbOpTimeoutMs,
-          'persistMatchesToOracle'
-        );
-        this.logger.log('Oracle channel matches persisted', {
-          searchRef,
-          total: persisted.total,
-          inserted: persisted.inserted,
-          updated: persisted.updated,
-          failed: persisted.failed
-        });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        this.logger.warn('Oracle channel match persistence failed', { searchRef, error: message });
-      }
-      return {
-        searchRef,
-        crawl,
-        resultLinks,
-        displayLinks
-      };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.logger.error('Keyword crawl failed', message);
-      try {
-        await this.redisStore.failSearchRun(searchRef, message);
-      } catch {
-        // ignore redis-store failure in user path
-      }
-      throw err;
-    }
-  }
-
-  private async executeCrawlJob(params: {
-    chatId: number;
-    userId: number;
-    keyword: string;
-    maxIterations: number;
-  }) {
-    const { chatId, userId, keyword, maxIterations } = params;
-    let searchRef = `tmp_${Date.now()}_${chatId}`;
-    try {
-      const run = await this.runCrawlAndPersist({
-        chatId,
-        userId,
-        keyword,
-        maxIterations
-      });
-      searchRef = run.searchRef;
-      await this.bot.telegram.sendMessage(
-        chatId,
-        `✅ Crawl completed for “${keyword}”.\nIterations: ${run.crawl.iterations}\nSeed publics: ${run.crawl.seedPublics.length}\nChats processed: ${run.crawl.chatsProcessed}\nMessages stored: ${run.crawl.messagesStored}\nMessage links (channel+uid): ${run.displayLinks.length}\nTotal links: ${run.resultLinks.length}`,
+      await ctx.reply(
+        `نتیجه موجود آماده است ✅\nعبارت: «${keyword}»\n${this.summarizeClientLinks(cachedLinks)}\n\nاین نتیجه از کش ۷ روزه آمده؛ برای سرعت، تا یک هفته از دیتابیس جواب می‌دهم و بعد از آن سرچ تازه انجام می‌شود.`,
         this.mainMenuKeyboard
       );
-
-      if (!run.resultLinks.length) {
-        await this.bot.telegram.sendMessage(
-          chatId,
-          '😕 No Telegram links were found for this keyword.',
-          this.mainMenuKeyboard
-        );
-        return;
-      }
-
-      await this.sendPage(run.searchRef, 'links', 0, chatId);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      await this.bot.telegram.sendMessage(
-        chatId,
-        `⚠️ Crawl failed: ${message.length > 300 ? `${message.slice(0, 300)}...` : message}`,
-        this.mainMenuKeyboard
-      );
-    } finally {
-      this.runningChats.delete(chatId);
-      this.logger.log('Crawl job finished', { chatId, keyword, searchRef });
+      await this.sendPage(String(cachedSearch.id), 'links', 0, chatId);
+      return;
     }
-  }
-
-  private async handleKeywordSearch(ctx: any, rawInput: string, fromCommand: boolean) {
-    const chatId = ctx.chat?.id as number | undefined;
-    if (!chatId) return;
-
-    const { keyword, iterations } = this.parseKeywordAndIterations(rawInput, fromCommand);
-    if (!keyword) {
-      return ctx.reply('❗ Please send a keyword.', this.mainMenuKeyboard);
-    }
-
-    const defaultIterations = Math.max(1, Number(this.config.get<number>('crawlIterations') || 5));
-    const maxIterations = Math.max(1, Math.min(50, iterations ?? defaultIterations));
-    this.logger.log('Keyword request received', { chatId, keyword, maxIterations, fromCommand });
 
     if (this.runningChats.has(chatId)) {
-      return ctx.reply('⏳ A crawl job is already running in this chat. Please wait.', this.mainMenuKeyboard);
+      return ctx.reply('یک جستجو هنوز در حال اجراست؛ لطفاً چند لحظه صبر کن.', this.mainMenuKeyboard);
     }
-
-    const tgId = String(ctx.from?.id || '');
-    const user = await this.userRepo.findOne({ where: { telegram_id: tgId } });
-    if (!user) return ctx.reply('❗ Please /start first.', this.mainMenuKeyboard);
 
     this.runningChats.add(chatId);
     await ctx.reply(
-      `🔎 Starting crawl for “${keyword}” (max iterations: ${maxIterations}).\nI will send paginated links when done.`,
+      `جستجو برای «${keyword}» شروع شد 🔎\nدر سریع‌ترین زمان ممکن کامل‌ترین لینک‌های مرتبط را می‌فرستم.`,
       this.mainMenuKeyboard
     );
 
@@ -865,21 +591,21 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     if (!chatId) return;
 
     if (this.runningChats.has(chatId)) {
-      return ctx.reply('⏳ A crawl job is already running in this chat. Please wait.', this.mainMenuKeyboard);
+      return ctx.reply('یک جستجو هنوز در حال اجراست؛ لطفاً چند لحظه صبر کن.', this.mainMenuKeyboard);
     }
 
     const doc = (ctx.message as any)?.document;
     if (!doc?.file_id) {
-      return ctx.reply('❗ Please upload a valid Excel file (.xlsx or .xls).', this.mainMenuKeyboard);
+      return ctx.reply('لطفاً یک فایل اکسل معتبر با پسوند xlsx یا xls بفرست.', this.mainMenuKeyboard);
     }
     const fileName = String(doc.file_name || '').trim().toLowerCase();
     if (!fileName.endsWith('.xlsx') && !fileName.endsWith('.xls')) {
-      return ctx.reply('❗ Unsupported file type. Please upload .xlsx or .xls.', this.mainMenuKeyboard);
+      return ctx.reply('فرمت فایل پشتیبانی نمی‌شود؛ فقط فایل xlsx یا xls قابل قبول است.', this.mainMenuKeyboard);
     }
 
     const tgId = String(ctx.from?.id || '');
     const user = await this.userRepo.findOne({ where: { telegram_id: tgId } });
-    if (!user) return ctx.reply('❗ Please /start first.', this.mainMenuKeyboard);
+    if (!user) return ctx.reply('لطفاً اول دستور start را بزن تا منوی اصلی فعال شود.', this.mainMenuKeyboard);
 
     const caption = String((ctx.message as any)?.caption || '');
     const iterMatch = caption.match(/--?(?:iter|iterations?)(?:=|\s+)(\d+)/i);
@@ -897,10 +623,10 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         throw new Error(`failed to download file (${response.status})`);
       }
       const content = Buffer.from(await response.arrayBuffer());
-      const workbook = XLSX.read(content, { type: 'buffer' });
+      const workbook = await this.loadExcelWorkbook(content, fileName);
       const batches = this.extractKeywordBatchesFromWorkbook(workbook);
       if (!batches.length) {
-        await ctx.reply('❗ No keywords were found in the uploaded file.', this.mainMenuKeyboard);
+        await ctx.reply('داخل فایل اکسل هیچ کلمه‌ای پیدا نکردم.', this.mainMenuKeyboard);
         return;
       }
 
@@ -925,7 +651,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         Number(this.config.get<number>('excelCrawlConcurrency') || 2)
       );
       await ctx.reply(
-        `📄 Received ${batches.length} sheet(s), ${originalKeywordsCount} keyword(s). Starting batch crawl for ${limitedBatches.length} sheet(s), ${limitedKeywordsCount} keyword(s), max iterations ${maxIterations}, concurrency ${excelConcurrency}.`,
+        `فایل اکسل دریافت شد 📄\nتعداد شیت‌ها: ${batches.length}\nتعداد کلمه‌ها: ${originalKeywordsCount}\nجستجو برای ${limitedKeywordsCount} کلمه شروع شد.`,
         this.mainMenuKeyboard
       );
 
@@ -1008,7 +734,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
             if (shouldReportProgress(completed, totalTasks)) {
               await this.bot.telegram.sendMessage(
                 chatId,
-                `⏱ Progress: ${completed}/${totalTasks} keyword(s) processed.`
+                `پیشرفت جستجو: ${completed} از ${totalTasks} کلمه پردازش شد.`
               );
             }
           }
@@ -1017,7 +743,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
       await Promise.all(workers);
 
-      const outputWorkbook = XLSX.utils.book_new();
+      const outputWorkbook = new ExcelJS.Workbook();
+      outputWorkbook.creator = 'telegram-keyword-bot';
+      outputWorkbook.created = new Date();
       const usedSheetNames = new Set<string>();
       let exportedRowsCount = 0;
       for (let i = 0; i < sheetResults.length; i += 1) {
@@ -1041,22 +769,39 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         const mergedRows = Array.from(dedupe.values());
         exportedRowsCount += mergedRows.length;
 
-        const rows: Array<Array<string>> = [['type', 'channel', 'uid', 'link']];
+        const rows: Array<Array<string>> = [['نوع', 'کانال', 'شناسه', 'لینک']];
         if (!mergedRows.length && !result.errors.length) {
-          rows.push(['info', '', '', 'No links found']);
+          rows.push(['اطلاعات', '', '', 'لینکی پیدا نشد']);
         } else {
           for (const row of mergedRows) {
             rows.push([row.type, row.channel, row.uid, row.link]);
           }
           for (const err of result.errors) {
-            rows.push(['error', '', '', err]);
+            rows.push(['خطا', '', '', err]);
           }
         }
-        const worksheet = XLSX.utils.aoa_to_sheet(rows);
-        XLSX.utils.book_append_sheet(outputWorkbook, worksheet, sheetName);
+        const worksheet = outputWorkbook.addWorksheet(sheetName);
+        worksheet.columns = [
+          { key: 'type', width: 14 },
+          { key: 'channel', width: 28 },
+          { key: 'uid', width: 16 },
+          { key: 'link', width: 72 }
+        ];
+        for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+          const worksheetRow = worksheet.addRow(rows[rowIndex]);
+          if (rowIndex === 0) {
+            worksheetRow.font = { bold: true };
+          } else {
+            const link = rows[rowIndex][3];
+            if (/^https?:\/\//i.test(link)) {
+              worksheetRow.getCell(4).value = { text: link, hyperlink: link };
+            }
+          }
+        }
       }
 
-      const outputBuffer = XLSX.write(outputWorkbook, { bookType: 'xlsx', type: 'buffer' }) as Buffer;
+      const outputData = await outputWorkbook.xlsx.writeBuffer();
+      const outputBuffer = Buffer.from(outputData);
       const failedCount = sheetResults.reduce((sum, s) => sum + s.errors.length, 0);
       await this.bot.telegram.sendDocument(chatId, {
         source: outputBuffer,
@@ -1064,14 +809,14 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       } as any);
       await this.bot.telegram.sendMessage(
         chatId,
-        `✅ Batch crawl completed.\nSheets: ${sheetResults.length}\nKeywords: ${limitedKeywordsCount}\nFailed keywords: ${failedCount}\nExported links: ${exportedRowsCount}`,
+        `پردازش فایل اکسل تمام شد ✅\nتعداد شیت‌ها: ${sheetResults.length}\nتعداد کلمه‌ها: ${limitedKeywordsCount}\nکلمه‌های ناموفق: ${failedCount}\nلینک‌های خروجی: ${exportedRowsCount}`,
         this.mainMenuKeyboard
       );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       await this.bot.telegram.sendMessage(
         chatId,
-        `⚠️ Excel import failed: ${message.length > 300 ? `${message.slice(0, 300)}...` : message}`,
+        `پردازش فایل اکسل ناموفق بود. لطفاً فایل را بررسی کن و دوباره بفرست.\nجزئیات فنی: ${message.length > 250 ? `${message.slice(0, 250)}...` : message}`,
         this.mainMenuKeyboard
       );
     } finally {
@@ -1210,8 +955,8 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         await this.bot.telegram.sendMessage(
           chatId,
           source === 'links'
-            ? 'No message links with channel id and uid were found for this search.'
-            : 'No cached results available for this page.'
+            ? 'برای این جستجو لینک پیام قابل نمایش پیدا نشد.'
+            : 'نتیجه‌ای برای این صفحه در حافظه نیست.'
         );
       }
       return;
@@ -1223,10 +968,10 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     const sourceItems = source === 'links' ? groupedLinkItems : items;
     const slice = sourceItems.slice(safePageIdx * pageSize, (safePageIdx + 1) * pageSize);
     let text = source === 'web'
-      ? `🌐 Web Results (Page ${safePageIdx + 1}/${totalPages}):\n\n`
+      ? `نتایج وب، صفحه ${safePageIdx + 1} از ${totalPages}:\n\n`
       : source === 'telegram'
-        ? `🤖 Telegram Results (Page ${safePageIdx + 1}/${totalPages}):\n\n`
-        : `🔗 Discovered Telegram Links (Page ${safePageIdx + 1}/${totalPages}):\n\n`;
+        ? `نتایج تلگرام، صفحه ${safePageIdx + 1} از ${totalPages}:\n\n`
+        : `لینک‌های پیدا شده، صفحه ${safePageIdx + 1} از ${totalPages}:\n\n`;
 
     if (source === 'web') {
       text += slice
@@ -1247,35 +992,41 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       }
     } else {
       const chunks: string[] = [];
+      const publicRootLinks = rootLinks.filter((link) => this.isPublicTelegramLink(link));
+      const privateRootLinks = rootLinks.filter((link) => this.isPrivateTelegramLink(link));
+      const publicGroups = (slice as GroupedChannelLinks[]).filter((entry) =>
+        entry.links.some((link) => !this.isPrivateTelegramLink(link))
+      );
+      const privateGroups = (slice as GroupedChannelLinks[]).filter((entry) =>
+        entry.links.every((link) => this.isPrivateTelegramLink(link))
+      );
+
       if (safePageIdx === 0 && inviteLinks.length) {
-        chunks.push(
-          `Join these invite links first (manual if needed), then open message links:\n${inviteLinks.join('\n')}`
-        );
+        chunks.push(this.formatLinkList('گروه‌ها یا کانال‌های خصوصی - لینک دعوت', inviteLinks));
       }
       if (safePageIdx === 0 && botItems.length) {
-        chunks.push(`Bot Links:\n${botItems.join('\n')}`);
+        chunks.push(this.formatLinkList('بات‌ها', botItems));
       }
-      if (safePageIdx === 0 && rootLinks.length) {
-        chunks.push(`Channel/Group Root Links:\n${rootLinks.join('\n')}`);
+      if (safePageIdx === 0 && publicRootLinks.length) {
+        chunks.push(this.formatLinkList('کانال‌ها یا گروه‌های عمومی - لینک اصلی', publicRootLinks));
       }
-      if ((slice as GroupedChannelLinks[]).length) {
-        chunks.push(
-          (slice as GroupedChannelLinks[])
-            .map(
-              (entry) =>
-                `Telegram UID: ${entry.channelId}\n\nMessage Links:\n${entry.links.join('\n')}`
-            )
-            .join('\n---------------------------------\n')
-        );
+      if (safePageIdx === 0 && privateRootLinks.length) {
+        chunks.push(this.formatLinkList('کانال‌ها یا گروه‌های خصوصی - لینک اصلی', privateRootLinks));
+      }
+      if (publicGroups.length) {
+        chunks.push(this.formatGroupedMessages('پیام‌های کانال‌ها یا گروه‌های عمومی', publicGroups));
+      }
+      if (privateGroups.length) {
+        chunks.push(this.formatGroupedMessages('پیام‌های کانال‌ها یا گروه‌های خصوصی', privateGroups));
       }
       text += chunks.join('\n\n');
     }
 
     const prevBtn = safePageIdx > 0
-      ? { text: '◀️ Prev', callback_data: `pg:${searchId}:${source}:${safePageIdx - 1}` }
+      ? { text: 'قبلی ◀️', callback_data: `pg:${searchId}:${source}:${safePageIdx - 1}` }
       : { text: ' ', callback_data: 'nop' };
     const nextBtn = safePageIdx < totalPages - 1
-      ? { text: 'Next ▶️', callback_data: `pg:${searchId}:${source}:${safePageIdx + 1}` }
+      ? { text: 'بعدی ▶️', callback_data: `pg:${searchId}:${source}:${safePageIdx + 1}` }
       : { text: ' ', callback_data: 'nop' };
 
     const opts = { reply_markup: { inline_keyboard: [[prevBtn, nextBtn]] } };

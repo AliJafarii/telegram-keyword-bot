@@ -22,13 +22,13 @@ export interface TelegramChat {
 @Entity({ name: 'searches' })
 @Index(['user_id', 'keyword', 'created_at'])
 export class SearchEntity {
-  @PrimaryGeneratedColumn({ type: 'number' })
+  @PrimaryGeneratedColumn()
   id!: number;
 
-  @Column({ type: 'number' })
+  @Column({ type: 'integer' })
   user_id!: number;
 
-  @Column({ type: 'varchar2', length: 256 })
+  @Column({ type: 'varchar', length: 256 })
   keyword!: string;
 
   @Column({ type: 'simple-json', nullable: true })
@@ -37,12 +37,12 @@ export class SearchEntity {
   @Column({ type: 'simple-json', nullable: true })
   results_telegram?: TelegramChat[];
 
-  @Column({ name: 'RESULTS_LINKS', type: 'clob', nullable: true })
+  @Column({ name: 'RESULTS_LINKS', type: 'text', nullable: true })
   results_links?: string;
 
-  @Column({ name: 'RESULTS_INVITES', type: 'clob', nullable: true })
+  @Column({ name: 'RESULTS_INVITES', type: 'text', nullable: true })
   results_invites?: string;
 
-  @Column({ type: 'timestamp', default: () => 'CURRENT_TIMESTAMP' })
+  @Column({ type: 'datetime', default: () => 'CURRENT_TIMESTAMP' })
   created_at!: Date;
 }

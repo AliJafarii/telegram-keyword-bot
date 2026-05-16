@@ -1,3 +1,36 @@
+const requiredProductionKeys = [
+  'TELEGRAM_BOT_TOKEN',
+  'API_ID',
+  'API_HASH',
+  'SESSION_STRING'
+];
+
+function isBlank(value: unknown): boolean {
+  return typeof value !== 'string' || value.trim().length === 0;
+}
+
+export function validateEnvironment(env: Record<string, unknown>): Record<string, unknown> {
+  if (env.SKIP_ENV_VALIDATION === 'true') return env;
+
+  const missing = requiredProductionKeys.filter((key) => isBlank(env[key]));
+  const errors: string[] = [];
+  if (missing.length) {
+    errors.push(`missing required variables: ${missing.join(', ')}`);
+  }
+
+  const apiId = Number(env.API_ID);
+  if (!isBlank(env.API_ID) && (!Number.isInteger(apiId) || apiId <= 0)) {
+    errors.push('API_ID must be a positive integer');
+  }
+
+  if (errors.length) {
+    const envFile = process.env.ENV_FILE || '.env.production';
+    throw new Error(`Invalid production environment (${envFile}): ${errors.join('; ')}`);
+  }
+
+  return env;
+}
+
 export default () => ({
   botToken: process.env.TELEGRAM_BOT_TOKEN || '',
   apiId: Number(process.env.API_ID || 0),
@@ -35,6 +68,9 @@ export default () => ({
   redisUrl: process.env.REDIS_URL || 'redis://127.0.0.1:6379',
   redisPrefix: process.env.REDIS_PREFIX || 'tkb',
   redisTtlSeconds: Number(process.env.REDIS_TTL_SECONDS || 604800),
+  databaseType: process.env.DATABASE_TYPE || 'sqlite',
+  sqliteDatabase: process.env.SQLITE_DATABASE || '/root/telegram-keyword-bot/data/telegram-keyword-bot.sqlite',
+  databaseSynchronize: process.env.DATABASE_SYNCHRONIZE !== 'false',
   oracleUser: process.env.ORACLE_USER || '',
   oraclePassword: process.env.ORACLE_PASSWORD || '',
   oracleConnectString: process.env.ORACLE_CONNECT_STRING || '',

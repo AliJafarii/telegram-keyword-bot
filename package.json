@@ -18,24 +18,25 @@
     "session:generate": "ENV_FILE=.env.production ts-node -r tsconfig-paths/register src/tools/generate-session.ts"
   },
   "dependencies": {
-    "@nestjs/common": "^10.4.5",
-    "@nestjs/config": "^3.2.3",
-    "@nestjs/core": "^10.4.5",
-    "@nestjs/platform-express": "^10.4.5",
-    "@nestjs/typeorm": "^10.0.2",
+    "@nestjs/common": "^11.1.21",
+    "@nestjs/config": "^4.0.4",
+    "@nestjs/core": "^11.1.21",
+    "@nestjs/platform-express": "^11.1.21",
+    "@nestjs/typeorm": "^11.0.1",
     "dotenv": "^16.6.1",
-    "mongodb": "^6.11.0",
+    "exceljs": "^4.4.0",
     "oracledb": "^6.5.0",
     "prompt-sync": "^4.2.0",
+    "qrcode": "^1.5.4",
     "redis": "^4.7.1",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
     "socks-proxy-agent": "^8.0.5",
+    "sqlite3": "^5.1.7",
     "telegraf": "^4.12.0",
     "telegram": "^2.26.22",
     "typeorm": "^0.3.20",
-    "winston": "^3.8.2",
-    "xlsx": "^0.18.5"
+    "winston": "^3.8.2"
   },
   "devDependencies": {
     "@types/node": "^20.11.30",

@@ -3,23 +3,23 @@ import { Column, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
 @Entity({ name: 'search_links' })
 @Index(['search_id', 'link'], { unique: true })
 export class SearchLinkEntity {
-  @PrimaryGeneratedColumn({ type: 'number' })
+  @PrimaryGeneratedColumn()
   id!: number;
 
-  @Column({ type: 'number' })
+  @Column({ type: 'integer' })
   @Index()
   search_id!: number;
 
-  @Column({ type: 'number', nullable: true })
+  @Column({ type: 'integer', nullable: true })
   @Index()
   channel_match_id?: number | null;
 
-  @Column({ type: 'varchar2', length: 512 })
+  @Column({ type: 'varchar', length: 512 })
   link!: string;
 
-  @Column({ type: 'varchar2', length: 32 })
+  @Column({ type: 'varchar', length: 32 })
   link_type!: string;
 
-  @Column({ type: 'timestamp', default: () => 'CURRENT_TIMESTAMP' })
+  @Column({ type: 'datetime', default: () => 'CURRENT_TIMESTAMP' })
   created_at!: Date;
 }
