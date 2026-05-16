@@ -1,5 +1,3 @@
-Total output lines: 2105
-
 import { Injectable } from '@nestjs/common';
 import { TelegramClient, Api } from 'telegram';
 import { StringSession } from 'telegram/sessions';
@@ -560,7 +558,1011 @@ export class SearchService {
       if (attrType.includes('documentattributevideo') || attrType.includes('roundvideo')) {
         return true;
       }
-      if (typeof attr?.roundMessage === 'b…8746 tokens truncated…('crawlSearchPageSize') || 20));
+      if (typeof attr?.roundMessage === 'boolean' && attr.roundMessage) {
+        return true;
+      }
+      if (typeof attr?.supportsStreaming === 'boolean' && attr.supportsStreaming) {
+        return true;
+      }
+    }
+
+    if (typeof msgAny?.video === 'boolean' && msgAny.video) return true;
+    if (typeof msgAny?.roundMessage === 'boolean' && msgAny.roundMessage) return true;
+    return false;
+  }
+
+  private async joinInviteIfNeeded(link: string, abortSignal?: AbortSignal): Promise<Api.TypeChat | null> {
+    const hash = this.parseInviteHash(link);
+    if (!hash) return null;
+    try {
+      const res: any = await this.invokeWithTimeout(
+        this.client.invoke(
+          new Api.messages.ImportChatInvite({ hash } as any)
+        ),
+        15000,
+        'iterative_import_chat_invite',
+        abortSignal
+      );
+      if (res?.chats?.length) return res.chats[0] as Api.TypeChat;
+    } catch (err) {
+      this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.warn('ImportChatInvite failed', { link, error: message });
+    }
+    return null;
+  }
+
+  private async leaveChannelIfNeeded(chat: Api.TypeChat, searchId: number): Promise<void> {
+    const chatAny = chat as any;
+    const chatType = String(chatAny?._ || '').toLowerCase();
+    if (!chatType.includes('channel')) return;
+    const chatKey = this.getChatKey(chat);
+    try {
+      await this.invokeWithTimeout(
+        this.client.invoke(
+          new Api.channels.LeaveChannel({
+            channel: chat as any
+          } as any)
+        ),
+        15000,
+        'iterative_leave_channel'
+      );
+      await this.logStep(searchId, 'iterative_private_chat_left', { chat: chatKey });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.logStep(searchId, 'iterative_private_chat_leave_error', { chat: chatKey, error: message });
+    }
+  }
+
+  private async leaveJoinedPrivateChats(chats: Api.TypeChat[], searchId: number): Promise<void> {
+    for (const chat of chats) {
+      await this.leaveChannelIfNeeded(chat, searchId);
+    }
+  }
+
+  private randomLong(): bigint {
+    const raw = randomBytes(8).toString('hex');
+    const asBigInt = BigInt(`0x${raw}`);
+    return BigInt.asUintN(63, asBigInt);
+  }
+
+  private async startBotIfNeeded(
+    username: string,
+    startParam: string | undefined,
+    searchId: number,
+    abortSignal?: AbortSignal
+  ): Promise<void> {
+    const command = startParam ? `/start ${startParam}` : '/start';
+    try {
+      const peer = await this.invokeWithTimeout(
+        this.client.getInputEntity(`@${username}`) as Promise<Api.TypeInputPeer>,
+        15000,
+        'iterative_bot_start_input',
+        abortSignal
+      );
+      await this.invokeWithTimeout(
+        this.client.invoke(
+          new Api.messages.SendMessage({
+            peer: peer as any,
+            message: command,
+            randomId: this.randomLong() as any,
+            noWebpage: true
+          } as any)
+        ),
+        15000,
+        'iterative_bot_start_send',
+        abortSignal
+      );
+      await this.logStep(searchId, 'iterative_bot_started', {
+        bot: username,
+        startParam: startParam || null
+      });
+    } catch (err) {
+      this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
+      const message = err instanceof Error ? err.message : String(err);
+      await this.logStep(searchId, 'iterative_bot_start_error', {
+        bot: username,
+        startParam: startParam || null,
+        error: message
+      });
+    }
+  }
+
+  private async resolveChatFromParsedLink(
+    parsed: ParsedTargetLink,
+    autoJoinInvites: boolean,
+    abortSignal?: AbortSignal
+  ): Promise<Api.TypeChat | null> {
+    if (parsed.kind === 'invite') {
+      if (!autoJoinInvites) return null;
+      return this.joinInviteIfNeeded(parsed.canonical, abortSignal);
+    }
+
+    if (parsed.username) {
+      try {
+        return await this.invokeWithTimeout(
+          this.client.getEntity(`@${parsed.username}`) as Promise<Api.TypeChat>,
+          15000,
+          'iterative_resolve_chat_by_username',
+          abortSignal
+        );
+      } catch {
+        return null;
+      }
+    }
+
+    if ((parsed.kind === 'private_message' || parsed.kind === 'private_chat') && parsed.privateChannelId) {
+      try {
+        const fullId = BigInt(`-100${parsed.privateChannelId}`);
+        return await this.invokeWithTimeout(
+          this.client.getEntity(fullId as any) as Promise<Api.TypeChat>,
+          15000,
+          'iterative_resolve_chat_by_private_id',
+          abortSignal
+        );
+      } catch {
+        return null;
+      }
+    }
+
+    return null;
+  }
+
+  private classifyClientLinkType(link: string): string {
+    const parsed = this.parseTargetLink(link);
+    if (!parsed) return 'message';
+    if (parsed.kind === 'bot') return 'bot';
+    if (parsed.kind === 'invite') return 'invite';
+    if (parsed.kind === 'public_chat' || parsed.kind === 'private_chat') return 'chat';
+    return 'message';
+  }
+
+  private async targetMessageContainsKeyword(
+    chat: Api.TypeChat,
+    messageId: number,
+    keywordTerms: string[],
+    abortSignal?: AbortSignal
+  ): Promise<boolean> {
+    if (!Number.isFinite(messageId) || messageId <= 0) return false;
+    let inputPeer: Api.TypeInputPeer;
+    try {
+      inputPeer = await this.invokeWithTimeout(
+        this.client.getInputEntity(chat) as Promise<Api.TypeInputPeer>,
+        15000,
+        'target_message_input_peer',
+        abortSignal
+      );
+    } catch {
+      this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
+      return false;
+    }
+
+    try {
+      const page = await this.fetchHistoryPage(
+        inputPeer,
+        messageId + 1,
+        5,
+        15000,
+        abortSignal
+      );
+      const exact = page.find((m) => Number((m as any)?.id || 0) === messageId);
+      if (!exact) return false;
+      const text = String((exact as any)?.message || '');
+      return this.messageContainsKeyword(text, keywordTerms);
+    } catch {
+      this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
+      return false;
+    }
+  }
+
+  private async extractBotBioLinks(username: string, searchId: number, abortSignal?: AbortSignal): Promise<string[]> {
+    try {
+      const input = await this.invokeWithTimeout(
+        this.client.getInputEntity(`@${username}`) as unknown as Promise<Api.TypeInputUser>,
+        15000,
+        'bot_bio_input_user',
+        abortSignal
+      );
+      const full = await this.invokeWithTimeout(
+        this.client.invoke(
+          new Api.users.GetFullUser({
+            id: input as any
+          } as any)
+        ),
+        15000,
+        'bot_bio_get_full_user',
+        abortSignal
+      );
+      const about = String((full as any)?.fullUser?.about || '');
+      if (!about.trim()) return [];
+      const links = this.collectTelegramLinks(about, [], undefined);
+      await this.logStep(searchId, 'iterative_bot_bio_links', { bot: username, links: links.length });
+      return links;
+    } catch (err) {
+      this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
+      const message = err instanceof Error ? err.message : String(err);
+      await this.logStep(searchId, 'iterative_bot_bio_links_error', { bot: username, error: message });
+      return [];
+    }
+  }
+
+  private async extractChatBioLinks(
+    chat: Api.TypeChat,
+    searchId: number,
+    abortSignal?: AbortSignal
+  ): Promise<string[]> {
+    const chatAny = chat as any;
+    const chatType = String(chatAny?._ || '').toLowerCase();
+    const chatKey = this.getChatKey(chat);
+    try {
+      let about = '';
+      if (chatType.includes('channel')) {
+        const input = await this.invokeWithTimeout(
+          this.client.getInputEntity(chat) as unknown as Promise<Api.TypeInputChannel>,
+          15000,
+          'chat_bio_input_channel',
+          abortSignal
+        );
+        const full = await this.invokeWithTimeout(
+          this.client.invoke(
+            new Api.channels.GetFullChannel({
+              channel: input as any
+            } as any)
+          ),
+          15000,
+          'chat_bio_get_full_channel',
+          abortSignal
+        );
+        about = String((full as any)?.fullChat?.about || '');
+      } else if (chatType.includes('chat')) {
+        const chatId = Number(chatAny?.id || 0);
+        if (!Number.isFinite(chatId) || chatId <= 0) return [];
+        const full = await this.invokeWithTimeout(
+          this.client.invoke(
+            new Api.messages.GetFullChat({
+              chatId: chatId as any
+            } as any)
+          ),
+          15000,
+          'chat_bio_get_full_chat',
+          abortSignal
+        );
+        about = String((full as any)?.fullChat?.about || '');
+      } else {
+        return [];
+      }
+
+      if (!about.trim()) return [];
+      const links = this.collectTelegramLinks(about, [], undefined);
+      await this.logStep(searchId, 'iterative_chat_bio_links', { chat: chatKey, links: links.length });
+      return links;
+    } catch (err) {
+      this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
+      const message = err instanceof Error ? err.message : String(err);
+      await this.logStep(searchId, 'iterative_chat_bio_links_error', { chat: chatKey, error: message });
+      return [];
+    }
+  }
+
+  private async resolveParsedLinkForFrontier(params: {
+    parsed: ParsedTargetLink;
+    autoJoinInvites: boolean;
+    keywordTerms: string[];
+    searchId: number;
+    joinedPrivateChats: Map<string, Api.TypeChat>;
+    abortSignal?: AbortSignal;
+  }): Promise<Api.TypeChat | null> {
+    const {
+      parsed,
+      autoJoinInvites,
+      keywordTerms,
+      searchId,
+      joinedPrivateChats,
+      abortSignal
+    } = params;
+
+    let resolved: Api.TypeChat | null = null;
+    if (parsed.kind === 'invite') {
+      if (!autoJoinInvites) return null;
+      resolved = await this.joinInviteIfNeeded(parsed.canonical, abortSignal);
+      if (resolved) {
+        const joinedKey = this.getChatKey(resolved);
+        if (joinedKey) joinedPrivateChats.set(joinedKey, resolved);
+      }
+    } else {
+      resolved = await this.resolveChatFromParsedLink(parsed, autoJoinInvites, abortSignal);
+    }
+    if (!resolved) return null;
+
+    if (parsed.messageId) {
+      const targetHasKeyword = await this.targetMessageContainsKeyword(
+        resolved,
+        parsed.messageId,
+        keywordTerms,
+        abortSignal
+      );
+      if (!targetHasKeyword) {
+        if (this.chatIdentityContainsKeyword(resolved, keywordTerms)) {
+          await this.logStep(searchId, 'iterative_link_target_keyword_fallback_identity', {
+            link: parsed.canonical,
+            messageId: parsed.messageId
+          });
+          return resolved;
+        }
+        await this.logStep(searchId, 'iterative_link_target_keyword_miss', {
+          link: parsed.canonical,
+          messageId: parsed.messageId
+        });
+        return null;
+      }
+    }
+
+    return resolved;
+  }
+
+  private isAccessDeniedError(errorMessage: string): boolean {
+    return /CHANNEL_PRIVATE|USER_NOT_PARTICIPANT|CHAT_ADMIN_REQUIRED|CHANNEL_INVALID|CHANNEL_PUBLIC_GROUP_NA/i
+      .test(errorMessage);
+  }
+
+  private isAlreadyJoinedResult(errorMessage: string): boolean {
+    return /USER_ALREADY_PARTICIPANT|INVITE_REQUEST_SENT|ALREADY/i.test(errorMessage);
+  }
+
+  private async tryJoinChat(
+    chat: Api.TypeChat,
+    searchId: number,
+    reason: string,
+    abortSignal?: AbortSignal
+  ): Promise<boolean> {
+    const chatAny = chat as any;
+    const chatType = String(chatAny?._ || '').toLowerCase();
+    if (!chatType.includes('channel')) return false;
+
+    const chatKey = this.getChatKey(chat);
+    try {
+      await this.invokeWithTimeout(
+        this.client.invoke(
+          new Api.channels.JoinChannel({
+            channel: chat as any
+          } as any)
+        ),
+        15000,
+        `${reason}_join_channel`,
+        abortSignal
+      );
+      await this.logStep(searchId, 'iterative_chat_joined', { chat: chatKey, reason });
+      return true;
+    } catch (err) {
+      this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
+      const message = err instanceof Error ? err.message : String(err);
+      if (this.isAlreadyJoinedResult(message)) {
+        await this.logStep(searchId, 'iterative_chat_join_ack', { chat: chatKey, reason, result: message });
+        return true;
+      }
+      await this.logStep(searchId, 'iterative_chat_join_error', { chat: chatKey, reason, error: message });
+      return false;
+    }
+  }
+
+  private async fetchHistoryPage(
+    peer: Api.TypeInputPeer,
+    offsetId: number,
+    limit: number,
+    timeoutMs: number,
+    abortSignal?: AbortSignal
+  ): Promise<Api.Message[]> {
+    const hist = await this.invokeWithTimeout(
+      this.client.invoke(
+        new Api.messages.GetHistory({
+          peer: peer as any,
+          offsetId: offsetId as any,
+          addOffset: 0,
+          limit,
+          maxId: 0 as any,
+          minId: 0 as any,
+          hash: 0 as any
+        } as any)
+      ),
+      timeoutMs,
+      'iterative_chat_history_page',
+      abortSignal
+    );
+    const histAny = hist as any;
+    return (histAny.messages || []).filter((m: any) => Boolean(m?.message)) as Api.Message[];
+  }
+
+  private normalizeAbortReason(reason: unknown, label: string): Error {
+    if (reason instanceof Error) return reason;
+    const reasonText = typeof reason === 'string' && reason.trim() ? `: ${reason.trim()}` : '';
+    const err = new Error(`${label} aborted${reasonText}`);
+    err.name = 'AbortError';
+    return err;
+  }
+
+  private throwIfAborted(abortSignal: AbortSignal | undefined, label: string): void {
+    if (!abortSignal?.aborted) return;
+    throw this.normalizeAbortReason(abortSignal.reason, label);
+  }
+
+  private async invokeWithTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    label: string,
+    abortSignal?: AbortSignal
+  ): Promise<T> {
+    this.throwIfAborted(abortSignal, label);
+
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      let timer: NodeJS.Timeout | null = null;
+      const finish = (handler: () => void) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        if (abortSignal) {
+          abortSignal.removeEventListener('abort', onAbort);
+        }
+        handler();
+      };
+
+      const onAbort = () => {
+        finish(() => reject(this.normalizeAbortReason(abortSignal?.reason, label)));
+      };
+
+      if (abortSignal) {
+        abortSignal.addEventListener('abort', onAbort, { once: true });
+      }
+
+      timer = setTimeout(() => {
+        finish(() => reject(new Error(`${label} timeout after ${timeoutMs}ms`)));
+      }, timeoutMs);
+
+      promise.then(
+        (value) => finish(() => resolve(value)),
+        (err) => finish(() => reject(err))
+      );
+    });
+  }
+
+  private async logStep(searchId: number, step: string, details?: Record<string, unknown>) {
+    this.logger.log(`Crawl step: ${step}`, details ? { details } : undefined);
+    const persistSteps = this.config.get<boolean>('crawlPersistSteps') === true;
+    if (!persistSteps) return;
+    const timeoutMs = Math.max(500, Number(this.config.get<number>('crawlDbTimeoutMs') || 5000));
+    try {
+      await this.invokeWithTimeout(
+        this.crawlStepRepo.save({
+          search_id: searchId,
+          step,
+          details: details ? JSON.stringify(details) : undefined
+        }),
+        timeoutMs,
+        'crawl_step_save'
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.warn('Crawl step save failed', { step, error: message });
+    }
+  }
+
+  private isOracleUniqueViolation(errorMessage: string): boolean {
+    return /ORA-00001|unique constraint/i.test(errorMessage);
+  }
+
+  private isOracleInvalidIdentifier(errorMessage: string): boolean {
+    return /ORA-00904|invalid identifier/i.test(errorMessage);
+  }
+
+  private quoteIdentifier(identifier: string): string {
+    return `"${identifier.replace(/"/g, '""')}"`;
+  }
+
+  private tableRefForName(tableName: string): string {
+    if (/^[A-Z][A-Z0-9_$#]*$/.test(tableName)) return tableName;
+    return this.quoteIdentifier(tableName);
+  }
+
+  private truncateVarchar(value: string, maxLength: number): string {
+    if (value.length <= maxLength) return value;
+    return value.slice(0, maxLength);
+  }
+
+  private async getChannelMatchTableMeta(forceRefresh = false): Promise<ChannelMatchTableMeta> {
+    if (!forceRefresh && this.channelMatchTableMeta) {
+      return this.channelMatchTableMeta;
+    }
+
+    const tableRows = await this.channelRepo.query(`
+      SELECT TABLE_NAME
+      FROM USER_TABLES
+      WHERE LOWER(TABLE_NAME) = 'channel_matches'
+      ORDER BY CASE
+        WHEN TABLE_NAME = 'channel_matches' THEN 0
+        WHEN TABLE_NAME = 'CHANNEL_MATCHES' THEN 1
+        ELSE 2
+      END
+    `);
+    if (!tableRows?.length) {
+      throw new Error('channel_matches table not found in current Oracle schema');
+    }
+    const tableName = String(tableRows[0]?.TABLE_NAME || tableRows[0]?.table_name || '').trim();
+    if (!tableName) {
+      throw new Error('channel_matches table name resolution failed');
+    }
+    const safeTableName = tableName.replace(/'/g, "''");
+    const columnRows = await this.channelRepo.query(
+      `SELECT COLUMN_NAME FROM USER_TAB_COLS WHERE TABLE_NAME = '${safeTableName}'`
+    );
+    const columnsByLower = new Map<string, string>();
+    for (const row of columnRows || []) {
+      const columnName = String(row?.COLUMN_NAME || row?.column_name || '').trim();
+      if (!columnName) continue;
+      if (!columnsByLower.has(columnName.toLowerCase())) {
+        columnsByLower.set(columnName.toLowerCase(), columnName);
+      }
+    }
+
+    this.channelMatchTableMeta = {
+      tableName,
+      tableRef: this.tableRefForName(tableName),
+      columnsByLower
+    };
+    return this.channelMatchTableMeta;
+  }
+
+  private async getSearchLinkTableMeta(forceRefresh = false): Promise<SearchLinkTableMeta> {
+    if (!forceRefresh && this.searchLinkTableMeta) {
+      return this.searchLinkTableMeta;
+    }
+
+    const tableRows = await this.searchLinkRepo.query(`
+      SELECT TABLE_NAME
+      FROM USER_TABLES
+      WHERE LOWER(TABLE_NAME) = 'search_links'
+      ORDER BY CASE
+        WHEN TABLE_NAME = 'search_links' THEN 0
+        WHEN TABLE_NAME = 'SEARCH_LINKS' THEN 1
+        ELSE 2
+      END
+    `);
+    if (!tableRows?.length) {
+      throw new Error('search_links table not found in current Oracle schema');
+    }
+    const tableName = String(tableRows[0]?.TABLE_NAME || tableRows[0]?.table_name || '').trim();
+    if (!tableName) {
+      throw new Error('search_links table name resolution failed');
+    }
+    const safeTableName = tableName.replace(/'/g, "''");
+    const columnRows = await this.searchLinkRepo.query(
+      `SELECT COLUMN_NAME FROM USER_TAB_COLS WHERE TABLE_NAME = '${safeTableName}'`
+    );
+    const columnsByLower = new Map<string, string>();
+    for (const row of columnRows || []) {
+      const columnName = String(row?.COLUMN_NAME || row?.column_name || '').trim();
+      if (!columnName) continue;
+      if (!columnsByLower.has(columnName.toLowerCase())) {
+        columnsByLower.set(columnName.toLowerCase(), columnName);
+      }
+    }
+
+    this.searchLinkTableMeta = {
+      tableName,
+      tableRef: this.tableRefForName(tableName),
+      columnsByLower
+    };
+    return this.searchLinkTableMeta;
+  }
+
+  private resolveTableColumn(meta: ChannelMatchTableMeta, logicalName: string): string | undefined {
+    return meta.columnsByLower.get(logicalName.toLowerCase());
+  }
+
+  private resolveSearchLinkTableColumn(meta: SearchLinkTableMeta, logicalName: string): string | undefined {
+    return meta.columnsByLower.get(logicalName.toLowerCase());
+  }
+
+  private isBotUsernameLink(link: string): boolean {
+    const match = link.match(/^https:\/\/t\.me\/([A-Za-z0-9_]+)(?:[/?#].*)?$/i);
+    return Boolean(match?.[1] && /bot$/i.test(match[1]));
+  }
+
+  private toClientLinkFromParsedTarget(parsed: ParsedTargetLink): string | null {
+    switch (parsed.kind) {
+      case 'bot':
+      case 'invite':
+      case 'public_chat':
+      case 'private_chat':
+        return parsed.canonical;
+      case 'private_message':
+        return parsed.privateChannelId ? `https://t.me/c/${parsed.privateChannelId}` : null;
+      default:
+        return null;
+    }
+  }
+
+  private buildClientLinksFromStoredRow(row: {
+    channelType?: string;
+    channelLink?: string;
+    messageLink?: string;
+    discoveredViaLink?: string;
+    relatedLinks?: string[];
+  }): string[] {
+    const out = new Set<string>();
+    const parsedMessage = row.messageLink ? this.parseTargetLink(row.messageLink) : null;
+    const isPrivateMessage = parsedMessage?.kind === 'private_message';
+
+    if ((row.channelType || '').toLowerCase() === 'bot') {
+      const parsedChannel = row.channelLink ? this.parseTargetLink(row.channelLink) : null;
+      const botRoot = parsedChannel && parsedChannel.kind === 'bot'
+        ? parsedChannel.canonical
+        : null;
+      if (botRoot) out.add(botRoot);
+    } else if (row.messageLink) {
+      out.add(row.messageLink);
+      if (isPrivateMessage && parsedMessage.privateChannelId) {
+        out.add(`https://t.me/c/${parsedMessage.privateChannelId}`);
+      }
+    }
+
+    if (isPrivateMessage) {
+      const parsedVia = row.discoveredViaLink ? this.parseTargetLink(row.discoveredViaLink) : null;
+      if (parsedVia) {
+        const viaLink = this.toClientLinkFromParsedTarget(parsedVia);
+        if (viaLink) out.add(viaLink);
+      }
+    }
+
+    for (const related of row.relatedLinks || []) {
+      const parsedRelated = this.parseTargetLink(related);
+      if (parsedRelated) {
+        const relatedLink = this.toClientLinkFromParsedTarget(parsedRelated);
+        if (relatedLink) out.add(relatedLink);
+      }
+    }
+    return Array.from(out);
+  }
+
+  private buildChannelMatchValues(
+    meta: ChannelMatchTableMeta,
+    mode: 'extended' | 'legacy',
+    row: {
+      searchId?: number;
+      searchRef: string;
+      channelType?: string;
+      channelLink?: string;
+      messageLink?: string;
+      messageId: number;
+      messageDate?: number;
+      matchReason?: 'keyword_hyperlink' | 'keyword_video';
+      iterationNo?: number;
+      discoveredViaLink?: string;
+      discoveredFromMessageLink?: string;
+      discoveredFromChannel?: string;
+      messageText: string;
+      relatedLinks: string[];
+    },
+    channel: string
+  ): Record<string, unknown> | null {
+    const colChannel = this.resolveTableColumn(meta, 'channel');
+    const colMessageId = this.resolveTableColumn(meta, 'message_id');
+    const colSearchId = this.resolveTableColumn(meta, 'search_id');
+    const colSearchRef = this.resolveTableColumn(meta, 'search_ref');
+    const colChannelLink = this.resolveTableColumn(meta, 'channel_link');
+    const colMessageLink = this.resolveTableColumn(meta, 'message_link');
+    const colChannelType = this.resolveTableColumn(meta, 'channel_type');
+    const colDate = this.resolveTableColumn(meta, 'date');
+    const colText = this.resolveTableColumn(meta, 'text');
+    const colLinks = this.resolveTableColumn(meta, 'links');
+    const colMatchReason = this.resolveTableColumn(meta, 'match_reason');
+    const colIterationNo = this.resolveTableColumn(meta, 'iteration_no');
+    const colDiscoveredViaLink = this.resolveTableColumn(meta, 'discovered_via_link');
+    const colDiscoveredFromMessageLink = this.resolveTableColumn(meta, 'discovered_from_message_link');
+    const colDiscoveredFromChannel = this.resolveTableColumn(meta, 'discovered_from_channel');
+    if (!colChannel || !colMessageId) return null;
+
+    const values: Record<string, unknown> = {
+      [colChannel]: channel,
+      [colMessageId]: row.messageId
+    };
+    if (colSearchId) {
+      values[colSearchId] = typeof row.searchId === 'number' ? row.searchId : null;
+    }
+    if (colChannelType) {
+      values[colChannelType] = row.channelType || null;
+    }
+    if (colChannelLink) {
+      values[colChannelLink] = row.channelLink || null;
+    }
+    if (colMessageLink) {
+      values[colMessageLink] = row.messageLink || null;
+    }
+    if (mode === 'extended' && colSearchRef) {
+      values[colSearchRef] = row.searchRef;
+    }
+    if (colDate) values[colDate] = row.messageDate ? new Date(row.messageDate) : new Date();
+    if (colText) values[colText] = row.messageText;
+    if (colMatchReason) values[colMatchReason] = row.matchReason || null;
+    if (colIterationNo) values[colIterationNo] = Number.isFinite(row.iterationNo) ? row.iterationNo : null;
+    if (colDiscoveredViaLink) values[colDiscoveredViaLink] = row.discoveredViaLink || null;
+    if (colDiscoveredFromMessageLink) values[colDiscoveredFromMessageLink] = row.discoveredFromMessageLink || null;
+    if (colDiscoveredFromChannel) values[colDiscoveredFromChannel] = row.discoveredFromChannel || null;
+    if (colLinks) {
+      const includeMessageLinkInLinks = !colMessageLink;
+      const payload = mode === 'extended'
+        ? JSON.stringify(row.relatedLinks || [])
+        : JSON.stringify([
+            ...(includeMessageLinkInLinks && row.messageLink ? [row.messageLink] : []),
+            ...(row.relatedLinks || [])
+          ]);
+      values[colLinks] = this.truncateVarchar(payload, 4000);
+    }
+
+    return values;
+  }
+
+  private async insertChannelMatchRow(meta: ChannelMatchTableMeta, values: Record<string, unknown>): Promise<void> {
+    const columns = Object.keys(values);
+    const sql = `INSERT INTO ${meta.tableRef} (${columns.map((c) => this.quoteIdentifier(c)).join(', ')})
+      VALUES (${columns.map((_, i) => `:${i + 1}`).join(', ')})`;
+    const binds = columns.map((column) => values[column]);
+    await this.channelRepo.query(sql, binds);
+  }
+
+  private async updateChannelMatchRow(
+    meta: ChannelMatchTableMeta,
+    values: Record<string, unknown>,
+    channelColumn: string,
+    messageIdColumn: string,
+    searchIdColumn?: string
+  ): Promise<void> {
+    const setColumns = Object.keys(values).filter(
+      (column) => column !== channelColumn && column !== messageIdColumn
+    );
+    if (!setColumns.length) return;
+    const setSql = setColumns.map((column, i) => `${this.quoteIdentifier(column)} = :${i + 1}`).join(', ');
+    const whereChannelIdx = setColumns.length + 1;
+    const whereMessageIdx = setColumns.length + 2;
+    const hasSearchFilter = Boolean(searchIdColumn && Object.prototype.hasOwnProperty.call(values, searchIdColumn));
+    const whereSearchIdx = setColumns.length + 3;
+    const sql = `UPDATE ${meta.tableRef}
+      SET ${setSql}
+      WHERE ${this.quoteIdentifier(channelColumn)} = :${whereChannelIdx}
+        AND ${this.quoteIdentifier(messageIdColumn)} = :${whereMessageIdx}
+        ${hasSearchFilter ? `AND ${this.quoteIdentifier(searchIdColumn!)} ${values[searchIdColumn!] === null ? 'IS NULL' : `= :${whereSearchIdx}`}` : ''}`;
+    const binds = [
+      ...setColumns.map((column) => values[column]),
+      values[channelColumn],
+      values[messageIdColumn]
+    ];
+    if (hasSearchFilter && values[searchIdColumn!] !== null) {
+      binds.push(values[searchIdColumn!]);
+    }
+    await this.channelRepo.query(sql, binds);
+  }
+
+  private async findChannelMatchId(
+    meta: ChannelMatchTableMeta,
+    channelColumn: string,
+    messageIdColumn: string,
+    channel: string,
+    messageId: number,
+    searchIdColumn?: string,
+    searchId?: number | null
+  ): Promise<number | null> {
+    const idColumn = this.resolveTableColumn(meta, 'id');
+    if (!idColumn) return null;
+
+    let sql = `SELECT ${this.quoteIdentifier(idColumn)} AS ID
+      FROM ${meta.tableRef}
+      WHERE ${this.quoteIdentifier(channelColumn)} = :1
+        AND ${this.quoteIdentifier(messageIdColumn)} = :2`;
+    const binds: unknown[] = [channel, messageId];
+
+    if (searchIdColumn) {
+      if (typeof searchId === 'number') {
+        sql += ` AND ${this.quoteIdentifier(searchIdColumn)} = :3`;
+        binds.push(searchId);
+      } else {
+        sql += ` AND ${this.quoteIdentifier(searchIdColumn)} IS NULL`;
+      }
+    }
+
+    const rows = await this.channelRepo.query(sql, binds);
+    const first = rows?.[0];
+    const value = first?.ID ?? first?.id;
+    if (value === undefined || value === null) return null;
+    const asNumber = Number(value);
+    return Number.isFinite(asNumber) ? asNumber : null;
+  }
+
+  private async upsertSearchLinkRow(
+    searchId: number,
+    link: string,
+    linkType: string,
+    channelMatchId?: number | null
+  ): Promise<void> {
+    const existing = await this.searchLinkRepo.findOne({
+      where: { search_id: searchId, link } as any
+    });
+
+    if (existing) {
+      const updatePayload: Partial<SearchLinkEntity> = { link_type: linkType };
+      if (channelMatchId) updatePayload.channel_match_id = existing.channel_match_id ?? channelMatchId;
+      await this.searchLinkRepo.update(existing.id, updatePayload as any);
+      return;
+    }
+
+    await this.searchLinkRepo.save({
+      search_id: searchId,
+      link: this.truncateVarchar(link, 512),
+      link_type: this.truncateVarchar(linkType, 32),
+      channel_match_id: channelMatchId ?? null
+    } as any);
+  }
+
+  async getSearchLinksBySearchId(searchId: number): Promise<string[]> {
+    if (!Number.isFinite(searchId) || searchId <= 0) return [];
+    try {
+      const rows = await this.searchLinkRepo.find({
+        where: { search_id: searchId } as any,
+        order: { created_at: 'ASC', id: 'ASC' } as any
+      });
+      return rows
+        .filter((row) => (row.link_type || '').toLowerCase() !== 'related')
+        .map((row) => String(row.link || '').trim())
+        .filter(Boolean);
+    } catch {
+      return [];
+    }
+  }
+
+  async countSearchLinks(searchId: number): Promise<number> {
+    if (!Number.isFinite(searchId) || searchId <= 0) return 0;
+    try {
+      const rows = await this.searchLinkRepo.find({ where: { search_id: searchId } as any });
+      return rows.filter((row) => (row.link_type || '').toLowerCase() !== 'related').length;
+    } catch {
+      return 0;
+    }
+  }
+
+  private async detectChannelMatchSchemaMode(): Promise<'extended' | 'legacy'> {
+    this.channelMatchSchemaMode = 'extended';
+    return 'extended';
+  }
+
+  async persistMatchesToOracle(searchRef: string): Promise<{ total: number; inserted: number; updated: number; failed: number }> {
+    const rows = await this.redisStore.getAllMatches(searchRef);
+    let inserted = 0;
+    let updated = 0;
+    let failed = 0;
+    const failureSamples: string[] = [];
+
+    for (const row of rows) {
+      const channel = this.truncateVarchar(row.channelLink || row.channelKey || '', 128);
+      if (!channel || !row.messageId) {
+        failed += 1;
+        continue;
+      }
+
+      const searchIdFromRow = typeof row.searchId === 'number' && Number.isFinite(row.searchId)
+        ? row.searchId
+        : (/^\d+$/.test(row.searchRef || '') ? Number.parseInt(row.searchRef, 10) : undefined);
+
+      const relatedLinks = row.relatedLinks || [];
+      let matchId: number | null = null;
+
+      try {
+        const existing = await this.channelRepo.findOne({
+          where: {
+            search_id: searchIdFromRow ?? null,
+            channel,
+            message_id: row.messageId
+          } as any
+        });
+
+        const payload = {
+          search_id: searchIdFromRow ?? null,
+          channel,
+          channel_type: row.channelType || null,
+          channel_link: row.channelLink ? this.truncateVarchar(row.channelLink, 512) : null,
+          message_link: row.messageLink ? this.truncateVarchar(row.messageLink, 512) : null,
+          message_id: row.messageId,
+          date: row.messageDate ? new Date(row.messageDate) : new Date(),
+          match_reason: row.matchReason || null,
+          iteration_no: Number.isFinite(row.iterationNo) ? row.iterationNo : null,
+          discovered_via_link: row.discoveredViaLink ? this.truncateVarchar(row.discoveredViaLink, 512) : null,
+          discovered_from_message_link: row.discoveredFromMessageLink
+            ? this.truncateVarchar(row.discoveredFromMessageLink, 512)
+            : null,
+          discovered_from_channel: row.discoveredFromChannel
+            ? this.truncateVarchar(row.discoveredFromChannel, 128)
+            : null,
+          text: row.messageText || null,
+          links: this.truncateVarchar(JSON.stringify(relatedLinks), 4000)
+        };
+
+        if (existing) {
+          await this.channelRepo.update(existing.id, payload as any);
+          matchId = existing.id;
+          updated += 1;
+        } else {
+          const saved = await this.channelRepo.save(payload as any) as ChannelMatchEntity;
+          matchId = saved.id;
+          inserted += 1;
+        }
+
+        if (typeof searchIdFromRow === 'number' && searchIdFromRow > 0) {
+          const clientLinks = this.buildClientLinksFromStoredRow({
+            channelType: row.channelType,
+            channelLink: row.channelLink,
+            messageLink: row.messageLink,
+            discoveredViaLink: row.discoveredViaLink,
+            relatedLinks
+          });
+          for (const link of clientLinks) {
+            await this.upsertSearchLinkRow(
+              searchIdFromRow,
+              link,
+              this.classifyClientLinkType(link),
+              matchId
+            );
+          }
+        }
+      } catch (err) {
+        failed += 1;
+        const message = err instanceof Error ? err.message : String(err);
+        if (failureSamples.length < 5) failureSamples.push(message);
+      }
+    }
+
+    if (failed > 0 && failureSamples.length) {
+      this.logger.warn('Channel match row persistence failures', {
+        searchRef,
+        failed,
+        samples: failureSamples
+      });
+    }
+
+    return { total: rows.length, inserted, updated, failed };
+  }
+
+  async crawlKeywordIterative(
+    keyword: string,
+    searchId: number,
+    maxIterationsArg?: number,
+    searchRefArg?: string,
+    options?: CrawlRunOptions
+  ): Promise<KeywordCrawlResultDto> {
+    const abortSignal = options?.abortSignal;
+    this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
+    await this.initUserClient();
+    this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
+    const searchRef = searchRefArg || (searchId > 0 ? String(searchId) : `tmp_${Date.now()}`);
+
+    const keywordTerms = this.splitKeywordTerms(keyword);
+    if (!keywordTerms.length) {
+      return {
+        seedPublics: [],
+        links: [],
+        clientLinks: [],
+        invites: [],
+        chatsProcessed: 0,
+        messagesStored: 0,
+        iterations: 0
+      };
+    }
+
+    try {
+      await this.redisStore.upsertSearchRun(searchRef, keyword);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.warn('Redis store upsertSearchRun failed', { searchRef, error: message });
+    }
+
+    const seedLimit = Number(this.config.get<number>('tgDynamicChatLimit') || 200);
+    const pageSize = Math.max(1, Number(this.config.get<number>('crawlSearchPageSize') || 20));
     const maxPagesPerChat = Math.max(
       1,
       Number(this.config.get<number>('crawlSearchPagesPerChat') || 30)

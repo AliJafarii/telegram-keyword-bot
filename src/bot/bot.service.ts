@@ -1,5 +1,3 @@
-Total output lines: 1522
-
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { Markup, Telegraf } from 'telegraf';
 import { SocksProxyAgent } from 'socks-proxy-agent';
@@ -552,7 +550,483 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
   private filterClientBotLinks(rawLinks: string[]): string[] {
     const dedupe = new Map<string, string>();
-    for (const raw of rawLinks…4301 tokens truncated… (cachedSearch) {
+    for (const raw of rawLinks) {
+      const parsed = this.parseBotLink(raw);
+      if (!parsed) continue;
+      dedupe.set(parsed.toLowerCase(), parsed);
+    }
+    return Array.from(dedupe.values()).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+  }
+
+  private filterClientPlainRootLinks(rawLinks: string[]): string[] {
+    const dedupe = new Map<string, string>();
+    for (const raw of rawLinks) {
+      const parsed = this.parsePlainRootLink(raw);
+      if (!parsed) continue;
+      dedupe.set(parsed.toLowerCase(), parsed);
+    }
+    return Array.from(dedupe.values()).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+  }
+
+  private splitInviteAndRootLinks(links: string[]): { inviteLinks: string[]; rootLinks: string[] } {
+    const inviteLinks: string[] = [];
+    const rootLinks: string[] = [];
+    for (const link of links) {
+      if (/^https:\/\/t\.me\/\+/i.test(link) || /^https:\/\/t\.me\/joinchat\//i.test(link)) {
+        inviteLinks.push(link);
+      } else {
+        rootLinks.push(link);
+      }
+    }
+    return { inviteLinks, rootLinks };
+  }
+
+  private groupClientMessageLinks(items: ParsedMessageLink[]): GroupedChannelLinks[] {
+    const grouped = new Map<string, ParsedMessageLink[]>();
+    for (const item of items) {
+      if (!grouped.has(item.channelId)) grouped.set(item.channelId, []);
+      grouped.get(item.channelId)!.push(item);
+    }
+
+    return Array.from(grouped.entries())
+      .map(([channelId, entries]) => ({
+        channelId,
+        links: entries
+          .sort((a, b) => a.uid - b.uid)
+          .map((entry) => entry.link)
+      }))
+      .sort((a, b) => a.channelId.localeCompare(b.channelId, undefined, { sensitivity: 'base' }));
+  }
+
+  private isPrivateTelegramLink(link: string): boolean {
+    return /^https:\/\/t\.me\/c\/\d+(?:\/\d+)?$/i.test(link)
+      || /^https:\/\/t\.me\/(?:\+|joinchat\/)/i.test(link);
+  }
+
+  private isPublicTelegramLink(link: string): boolean {
+    return /^https:\/\/t\.me\/[A-Za-z0-9_]+(?:\/\d+)?$/i.test(link);
+  }
+
+  private formatLinkList(title: string, links: string[]): string {
+    if (!links.length) return '';
+    return [title, ...links.map((link) => 'ـ ' + link)].join('\n');
+  }
+
+  private formatGroupedMessages(title: string, groups: GroupedChannelLinks[]): string {
+    if (!groups.length) return '';
+    const body = groups
+      .map((entry) => [
+        'شناسه: ' + entry.channelId,
+        ...entry.links.map((link) => 'ـ ' + link)
+      ].join('\n'))
+      .join('\n\n');
+    return title + '\n' + body;
+  }
+
+  private summarizeClientLinks(links: string[]): string {
+    const messageLinks = this.filterClientMessageLinks(links);
+    const groupedMessages = this.groupClientMessageLinks(messageLinks);
+    const botLinks = this.filterClientBotLinks(links);
+    const plainRootLinks = this.filterClientPlainRootLinks(links);
+    const { inviteLinks, rootLinks } = this.splitInviteAndRootLinks(plainRootLinks);
+    const publicRootLinks = rootLinks.filter((link) => this.isPublicTelegramLink(link));
+    const privateRootLinks = rootLinks.filter((link) => this.isPrivateTelegramLink(link));
+    const publicMessageGroups = groupedMessages.filter((entry) =>
+      entry.links.some((link) => !this.isPrivateTelegramLink(link))
+    );
+    const privateMessageGroups = groupedMessages.filter((entry) =>
+      entry.links.every((link) => this.isPrivateTelegramLink(link))
+    );
+
+    return [
+      'خلاصه نتیجه موجود:',
+      'ـ بات‌ها: ' + botLinks.length,
+      'ـ لینک دعوت خصوصی: ' + inviteLinks.length,
+      'ـ کانال/گروه عمومی: ' + (publicRootLinks.length + publicMessageGroups.length),
+      'ـ کانال/گروه خصوصی: ' + (privateRootLinks.length + privateMessageGroups.length),
+      'ـ پیام‌های قابل نمایش: ' + messageLinks.length,
+      'ـ کل لینک‌ها: ' + links.length
+    ].join('\n');
+  }
+
+  private buildExportRows(links: string[], sourceKeyword?: string): ExportLinkRow[] {
+    const rows = new Map<string, ExportLinkRow>();
+
+    for (const raw of links) {
+      const message = this.parseMessageLink(raw);
+      if (message) {
+        rows.set(message.link, {
+          keyword: sourceKeyword,
+          type: 'message',
+          channel: message.channelId,
+          uid: String(message.uid),
+          link: message.link
+        });
+        continue;
+      }
+
+      const bot = this.parseBotLink(raw);
+      if (bot) {
+        const usernameMatch = bot.match(/^https:\/\/t\.me\/([A-Za-z0-9_]+)/i);
+        rows.set(bot, {
+          keyword: sourceKeyword,
+          type: 'bot',
+          channel: usernameMatch?.[1] || '',
+          uid: '',
+          link: bot
+        });
+        continue;
+      }
+
+      const root = this.parsePlainRootLink(raw);
+      if (!root) continue;
+
+      if (/^https:\/\/t\.me\/c\/\d+$/i.test(root)) {
+        const match = root.match(/^https:\/\/t\.me\/c\/(\d+)$/i);
+        rows.set(root, {
+          keyword: sourceKeyword,
+          type: 'private_root',
+          channel: match?.[1] || '',
+          uid: '',
+          link: root
+        });
+        continue;
+      }
+      if (/^https:\/\/t\.me\/\+/i.test(root) || /^https:\/\/t\.me\/joinchat\//i.test(root)) {
+        rows.set(root, {
+          keyword: sourceKeyword,
+          type: 'invite',
+          channel: '',
+          uid: '',
+          link: root
+        });
+        continue;
+      }
+
+      const usernameMatch = root.match(/^https:\/\/t\.me\/([A-Za-z0-9_]+)$/i);
+      rows.set(root, {
+        keyword: sourceKeyword,
+        type: 'chat_root',
+        channel: usernameMatch?.[1] || '',
+        uid: '',
+        link: root
+      });
+    }
+
+    return Array.from(rows.values()).sort((a, b) => {
+      const t = a.type.localeCompare(b.type, undefined, { sensitivity: 'base' });
+      if (t !== 0) return t;
+      const c = a.channel.localeCompare(b.channel, undefined, { sensitivity: 'base' });
+      if (c !== 0) return c;
+      const k = (a.keyword || '').localeCompare(b.keyword || '', undefined, { sensitivity: 'base' });
+      if (k !== 0) return k;
+      const u = a.uid.localeCompare(b.uid, undefined, { sensitivity: 'base' });
+      if (u !== 0) return u;
+      return a.link.localeCompare(b.link, undefined, { sensitivity: 'base' });
+    });
+  }
+
+  private async withTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    label: string,
+    onTimeout?: () => void
+  ): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const finish = (handler: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        handler();
+      };
+      const timer = setTimeout(() => {
+        if (onTimeout) {
+          try {
+            onTimeout();
+          } catch {
+            // ignore timeout hook failures
+          }
+        }
+        finish(() => reject(new Error(`${label} timeout after ${timeoutMs}ms`)));
+      }, timeoutMs);
+
+      promise.then(
+        (value) => finish(() => resolve(value)),
+        (err) => finish(() => reject(err))
+      );
+    });
+  }
+
+  private async createSearchRowOrThrow(params: {
+    userId: number;
+    keyword: string;
+    chatId: number;
+  }): Promise<SearchEntity> {
+    const { userId, keyword, chatId } = params;
+    const timeoutMs = Math.max(1000, Number(this.config.get<number>('searchCreateTimeoutMs') || 5000));
+    const maxAttempts = Math.max(1, Number(this.config.get<number>('searchCreateMaxAttempts') || 3));
+    let lastError: string | null = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        const row = await this.withTimeout(
+          this.searchRepo.save({
+            user_id: userId,
+            keyword
+          }),
+          timeoutMs,
+          `search_row_create_attempt_${attempt}`
+        );
+        if (attempt > 1) {
+          this.logger.log('Search row create succeeded after retry', { chatId, keyword, attempt, searchId: row.id });
+        }
+        return row;
+      } catch (err) {
+        lastError = err instanceof Error ? err.message : String(err);
+        this.logger.warn('Search row create attempt failed', {
+          chatId,
+          keyword,
+          attempt,
+          maxAttempts,
+          error: lastError
+        });
+      }
+    }
+
+    throw new Error(
+      `search_row_create failed after ${maxAttempts} attempt(s): ${lastError || 'unknown error'}`
+    );
+  }
+
+  private async runCrawlAndPersist(params: {
+    chatId: number;
+    userId: number;
+    keyword: string;
+    maxIterations: number;
+  }): Promise<CrawlRunResult> {
+    const { chatId, userId, keyword, maxIterations } = params;
+    const dbOpTimeoutMs = Math.max(10000, Number(this.config.get<number>('dbOpTimeoutMs') || 120000));
+    const configuredCrawlRuntimeMs = Math.max(
+      60000,
+      Number(this.config.get<number>('crawlMaxRuntimeMs') || 300000)
+    );
+    // Allow a grace window after crawl runtime for in-flight Telegram calls to settle.
+    const crawlTimeoutMs = Math.max(180000, configuredCrawlRuntimeMs + 300000);
+
+    let searchRef = `tmp_${Date.now()}_${chatId}`;
+    this.logger.log('Crawl job started', { chatId, userId, keyword, maxIterations, searchRef });
+    try {
+      const search = await this.createSearchRowOrThrow({ userId, keyword, chatId });
+      const searchDbId = search.id;
+      searchRef = String(searchDbId);
+      this.logger.log('Search row created', { searchDbId, keyword, chatId });
+      const crawlAbortController = new AbortController();
+
+      const crawl = await this.withTimeout(
+        this.searchService.crawlKeywordIterative(
+          keyword,
+          searchDbId,
+          maxIterations,
+          searchRef,
+          { abortSignal: crawlAbortController.signal }
+        ),
+        crawlTimeoutMs,
+        'crawlKeywordIterative',
+        () => {
+          crawlAbortController.abort(new Error(`crawlKeywordIterative timeout after ${crawlTimeoutMs}ms`));
+          this.logger.warn('Crawl timeout reached; abort requested', {
+            chatId,
+            keyword,
+            searchRef,
+            timeoutMs: crawlTimeoutMs
+          });
+        }
+      );
+      const resultLinks = crawl.clientLinks.length ? crawl.clientLinks : crawl.links;
+      const displayLinks = this.filterClientMessageLinks(resultLinks);
+      this.setInMemoryLinks(searchRef, resultLinks);
+      this.logger.log('Crawl job completed', {
+        searchRef,
+        chatId,
+        keyword,
+        iterations: crawl.iterations,
+        chatsProcessed: crawl.chatsProcessed,
+        messagesStored: crawl.messagesStored,
+        linksFound: resultLinks.length,
+        displayLinks: displayLinks.length
+      });
+
+      try {
+        await this.withTimeout(
+          this.searchRepo.update(searchDbId, {
+            results_links: JSON.stringify(resultLinks),
+            results_invites: JSON.stringify(crawl.invites)
+          }),
+          dbOpTimeoutMs,
+          'search_row_update'
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.logger.warn('Search row update failed; using in-memory results', { searchDbId, error: message });
+      }
+
+      try {
+        const persisted = await this.withTimeout(
+          this.searchService.persistMatchesToOracle(searchRef),
+          dbOpTimeoutMs,
+          'persistMatchesToOracle'
+        );
+        this.logger.log('Oracle channel matches persisted', {
+          searchRef,
+          total: persisted.total,
+          inserted: persisted.inserted,
+          updated: persisted.updated,
+          failed: persisted.failed
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.logger.warn('Oracle channel match persistence failed', { searchRef, error: message });
+      }
+      return {
+        searchRef,
+        crawl,
+        resultLinks,
+        displayLinks
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.error('Keyword crawl failed', message);
+      try {
+        await this.redisStore.failSearchRun(searchRef, message);
+      } catch {
+        // ignore redis-store failure in user path
+      }
+      throw err;
+    }
+  }
+
+  private async executeCrawlJob(params: {
+    chatId: number;
+    userId: number;
+    keyword: string;
+    maxIterations: number;
+  }) {
+    const { chatId, userId, keyword, maxIterations } = params;
+    let searchRef = `tmp_${Date.now()}_${chatId}`;
+    try {
+      const run = await this.runCrawlAndPersist({
+        chatId,
+        userId,
+        keyword,
+        maxIterations
+      });
+      searchRef = run.searchRef;
+      await this.bot.telegram.sendMessage(
+        chatId,
+        `نتیجه آماده شد ✅\nعبارت: «${keyword}»\nکانال‌های بررسی‌شده: ${run.crawl.chatsProcessed}\nپیام‌های مرتبط: ${run.crawl.messagesStored}\nلینک‌های قابل نمایش: ${run.displayLinks.length}`,
+        this.mainMenuKeyboard
+      );
+
+      if (!run.resultLinks.length) {
+        await this.bot.telegram.sendMessage(
+          chatId,
+          'متأسفانه برای این عبارت لینک تلگرامی قابل نمایش پیدا نشد.',
+          this.mainMenuKeyboard
+        );
+        return;
+      }
+
+      await this.sendPage(run.searchRef, 'links', 0, chatId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.bot.telegram.sendMessage(
+        chatId,
+        `متأسفانه جستجو کامل نشد. لطفاً کمی بعد دوباره امتحان کن.\nجزئیات فنی: ${message.length > 250 ? `${message.slice(0, 250)}...` : message}`,
+        this.mainMenuKeyboard
+      );
+    } finally {
+      this.runningChats.delete(chatId);
+      this.logger.log('Crawl job finished', { chatId, keyword, searchRef });
+    }
+  }
+
+  private async findLatestCachedSearch(keyword: string): Promise<SearchEntity | null> {
+    try {
+      const cacheCutoff = new Date(Date.now() - this.cachedSearchTtlMs);
+      const candidates = await this.searchRepo
+        .createQueryBuilder('search')
+        .where('search.keyword = :keyword', { keyword })
+        .andWhere('search.created_at >= :cacheCutoff', { cacheCutoff })
+        .orderBy('search.id', 'DESC')
+        .limit(5)
+        .getMany();
+
+      for (const candidate of candidates) {
+        const dbLinks = this.parseJsonStringArray(candidate.results_links);
+        if (dbLinks.length) return candidate;
+        try {
+          const tableLinks = await this.searchService.getSearchLinksBySearchId(candidate.id);
+          if (tableLinks.length) return candidate;
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          this.logger.warn('Cached search link lookup failed', {
+            keyword,
+            searchId: candidate.id,
+            error: message
+          });
+        }
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.warn('Cached search lookup failed', { keyword, error: message });
+    }
+    return null;
+  }
+
+  private async getCachedSearchLinks(search: SearchEntity): Promise<string[]> {
+    const dbLinks = this.parseJsonStringArray(search.results_links);
+    if (dbLinks.length) return dbLinks;
+
+    const cachedLinks = this.getInMemoryLinks(String(search.id));
+    if (cachedLinks.length) return cachedLinks;
+
+    try {
+      const redisLinks = await this.redisStore.getClientLinks(String(search.id));
+      if (redisLinks.length) return redisLinks;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.warn('Cached search redis link lookup failed', { searchId: search.id, error: message });
+    }
+
+    try {
+      return await this.searchService.getSearchLinksBySearchId(search.id);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.warn('Cached search table link lookup failed', { searchId: search.id, error: message });
+      return [];
+    }
+  }
+
+  private async handleKeywordSearch(ctx: any, rawInput: string, fromCommand: boolean) {
+    const chatId = ctx.chat?.id as number | undefined;
+    if (!chatId) return;
+
+    const { keyword, iterations } = this.parseKeywordAndIterations(rawInput, fromCommand);
+    if (!keyword) {
+      return ctx.reply('لطفاً یک کلمه یا عبارت برای جستجو بفرست.', this.mainMenuKeyboard);
+    }
+
+    const defaultIterations = Math.max(1, Number(this.config.get<number>('crawlIterations') || 5));
+    const maxIterations = Math.max(1, Math.min(50, iterations ?? defaultIterations));
+    this.logger.log('Keyword request received', { chatId, keyword, maxIterations, fromCommand });
+
+    const tgId = String(ctx.from?.id || '');
+    const user = await this.userRepo.findOne({ where: { telegram_id: tgId } });
+    if (!user) return ctx.reply('لطفاً اول دستور start را بزن تا منوی اصلی فعال شود.', this.mainMenuKeyboard);
+
+    const cachedSearch = await this.findLatestCachedSearch(keyword);
+    if (cachedSearch) {
       const cachedLinks = await this.getCachedSearchLinks(cachedSearch);
       this.logger.log('Serving keyword from cached search results', {
         chatId,
