@@ -70,6 +70,8 @@ export default () => ({
   excelCrawlConcurrency: Number(process.env.EXCEL_CRAWL_CONCURRENCY || 2),
   excelCrawlMaxRuntimeMs: Number(process.env.EXCEL_CRAWL_MAX_RUNTIME_MS || 180000),
   excelCrawlIterations: Number(process.env.EXCEL_CRAWL_ITERATIONS || 1),
+  excelHyperlinkRowLimit: Number(process.env.EXCEL_HYPERLINK_ROW_LIMIT || 5000),
+  crawlHistoryCacheMaxPages: Number(process.env.CRAWL_HISTORY_CACHE_MAX_PAGES || 500),
   crawlFuzzyEnabled: process.env.CRAWL_FUZZY_ENABLED !== 'false',
   crawlFuzzyMaxDistance: Number(process.env.CRAWL_FUZZY_MAX_DISTANCE || 1),
   crawlFuzzyMinTermLength: Number(process.env.CRAWL_FUZZY_MIN_TERM_LENGTH || 4),
