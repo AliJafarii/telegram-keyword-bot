@@ -91,6 +91,7 @@ export class SearchService {
   private readonly inputPeerCache = new Map<string, Promise<Api.TypeInputPeer>>();
   private readonly historyPageCache = new Map<string, { createdAt: number; messages: Api.Message[] }>();
   private readonly chatBioLinksCache = new Map<string, Promise<string[]>>();
+  private readonly historyCacheMaxPages: number;
   private sessionLoaded = false;
   private sessionInitPromise: Promise<void> | null = null;
   private channelMatchSchemaMode: 'unknown' | 'extended' | 'legacy' = 'unknown';
@@ -111,6 +112,10 @@ export class SearchService {
     // Rate limiter: minimum interval between Telegram API calls to avoid flood waits
     const rateLimitIntervalMs = Math.max(200, Number(this.config.get<number>('crawlRateLimitMs') || 2000));
     this.apiRateLimiter = new RateLimiter(rateLimitIntervalMs);
+    this.historyCacheMaxPages = Math.max(
+      0,
+      Number(this.config.get<number>('crawlHistoryCacheMaxPages') || 500)
+    );
 
     const proxyUrl = process.env.SOCKS_PROXY;
     const proxy = proxyUrl
@@ -1189,12 +1194,21 @@ export class SearchService {
     const messages = (histAny.messages || []).filter((m: any) => Boolean(m?.message)) as Api.Message[];
     if (cacheKey) {
       this.historyPageCache.set(cacheKey, { createdAt: now, messages });
-      if (this.historyPageCache.size > 5000) {
-        const keysToDelete = Array.from(this.historyPageCache.keys()).slice(0, 1000);
+      if (this.historyCacheMaxPages === 0) {
+        this.historyPageCache.clear();
+      } else if (this.historyPageCache.size > this.historyCacheMaxPages) {
+        const overflow = this.historyPageCache.size - this.historyCacheMaxPages;
+        const keysToDelete = Array.from(this.historyPageCache.keys()).slice(0, Math.max(overflow, 50));
         for (const key of keysToDelete) this.historyPageCache.delete(key);
       }
     }
     return messages;
+  }
+
+  clearRuntimeCaches() {
+    this.inputPeerCache.clear();
+    this.historyPageCache.clear();
+    this.chatBioLinksCache.clear();
   }
 
   private normalizeAbortReason(reason: unknown, label: string): Error {

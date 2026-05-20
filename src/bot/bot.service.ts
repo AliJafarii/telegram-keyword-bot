@@ -1258,11 +1258,11 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
       const sheetResults: Array<{
         inputSheetName: string;
-        rows: ExportLinkRow[];
+        rows: Map<string, ExportLinkRow>;
         errors: string[];
       }> = limitedBatches.map((batch) => ({
         inputSheetName: batch.inputSheetName,
-        rows: [],
+        rows: new Map<string, ExportLinkRow>(),
         errors: []
       }));
 
@@ -1329,7 +1329,12 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
                 error: result.error
               });
             } else {
-              sheetResults[task.sheetIndex].rows.push(...result.rows);
+              for (const row of result.rows) {
+                const key = `${row.type}|||${row.channel}|||${row.uid}|||${row.link}`;
+                if (!sheetResults[task.sheetIndex].rows.has(key)) {
+                  sheetResults[task.sheetIndex].rows.set(key, row);
+                }
+              }
             }
 
             completed += 1;
@@ -1350,6 +1355,10 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       outputWorkbook.created = new Date();
       const usedSheetNames = new Set<string>();
       let exportedRowsCount = 0;
+      const hyperlinkRowLimit = Math.max(
+        0,
+        Number(this.config.get<number>('excelHyperlinkRowLimit') || 5000)
+      );
       for (let i = 0; i < sheetResults.length; i += 1) {
         const result = sheetResults[i];
         const rawName = this.sanitizeSheetName(result.inputSheetName, i);
@@ -1362,26 +1371,8 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         }
         usedSheetNames.add(sheetName.toLowerCase());
 
-        const dedupe = new Map<string, ExportLinkRow>();
-        for (const row of result.rows) {
-          // Merge by link identity at sheet-level, not per-keyword.
-          const key = `${row.type}|||${row.channel}|||${row.uid}|||${row.link}`;
-          if (!dedupe.has(key)) dedupe.set(key, row);
-        }
-        const mergedRows = Array.from(dedupe.values());
+        const mergedRows = Array.from(result.rows.values());
         exportedRowsCount += mergedRows.length;
-
-        const rows: Array<Array<string>> = [['نوع', 'کانال', 'شناسه', 'لینک']];
-        if (!mergedRows.length && !result.errors.length) {
-          rows.push(['اطلاعات', '', '', 'لینکی پیدا نشد']);
-        } else {
-          for (const row of mergedRows) {
-            rows.push([row.type, row.channel, row.uid, row.link]);
-          }
-          for (const err of result.errors) {
-            rows.push(['خطا', '', '', err]);
-          }
-        }
         const worksheet = outputWorkbook.addWorksheet(sheetName);
         worksheet.columns = [
           { key: 'type', width: 14 },
@@ -1389,15 +1380,20 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
           { key: 'uid', width: 16 },
           { key: 'link', width: 72 }
         ];
-        for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
-          const worksheetRow = worksheet.addRow(rows[rowIndex]);
-          if (rowIndex === 0) {
-            worksheetRow.font = { bold: true };
-          } else {
-            const link = rows[rowIndex][3];
-            if (/^https?:\/\//i.test(link)) {
-              worksheetRow.getCell(4).value = { text: link, hyperlink: link };
+        const headerRow = worksheet.addRow(['نوع', 'کانال', 'شناسه', 'لینک']);
+        headerRow.font = { bold: true };
+        const useHyperlinks = hyperlinkRowLimit > 0 && mergedRows.length <= hyperlinkRowLimit;
+        if (!mergedRows.length && !result.errors.length) {
+          worksheet.addRow(['اطلاعات', '', '', 'لینکی پیدا نشد']);
+        } else {
+          for (const row of mergedRows) {
+            const worksheetRow = worksheet.addRow([row.type, row.channel, row.uid, row.link]);
+            if (useHyperlinks && /^https?:\/\//i.test(row.link)) {
+              worksheetRow.getCell(4).value = { text: row.link, hyperlink: row.link };
             }
+          }
+          for (const err of result.errors) {
+            worksheet.addRow(['خطا', '', '', err]);
           }
         }
       }
@@ -1424,6 +1420,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     } finally {
       this.pendingInputMode.delete(chatId);
       this.runningChats.delete(chatId);
+      this.searchService.clearRuntimeCaches();
     }
   }
 
