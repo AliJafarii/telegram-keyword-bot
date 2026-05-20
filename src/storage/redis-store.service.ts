@@ -16,12 +16,14 @@ export interface StoreMatchInput {
   messageLink?: string;
   messageText: string;
   messageDate?: number;
-  matchReason: 'keyword_hyperlink' | 'keyword_video';
+  matchReason: 'keyword_hyperlink' | 'keyword_video' | 'keyword_metadata';
   iterationNo: number;
   discoveredViaLink?: string;
   discoveredFromMessageLink?: string;
   discoveredFromChannel?: string;
   relatedLinks: string[];
+  mediaMetadata?: { [key: string]: unknown };
+  metadataQuery?: string;
 }
 
 export interface StoredMatch extends StoreMatchInput {}

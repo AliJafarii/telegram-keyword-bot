@@ -15,6 +15,6 @@ export class CrawlStepEntity {
   @Column({ type: 'text', nullable: true })
   details?: string;
 
-  @Column({ type: 'datetime', default: () => 'CURRENT_TIMESTAMP' })
+  @Column({ default: () => 'CURRENT_TIMESTAMP' })
   created_at!: Date;
 }

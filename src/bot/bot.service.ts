@@ -65,7 +65,6 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   private readonly runningChats = new Set<number>();
   private readonly inMemoryResults = new Map<string, InMemorySearchResult>();
   private readonly inMemoryTtlMs = 12 * 60 * 60 * 1000;
-  private readonly cachedSearchTtlMs = 7 * 24 * 60 * 60 * 1000;
   private readonly pendingInputMode = new Map<number, ChatInputMode>();
   private readonly menuSearchOneKeyword = 'جستجوی یک کلمه';
   private readonly menuImportExcel = 'ارسال فایل اکسل';
@@ -364,14 +363,32 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   private parseKeywordRowsFromWorksheet(sheet: ExcelJS.Worksheet): string[] {
     const out: string[] = [];
     sheet.eachRow({ includeEmpty: false }, (row) => {
-      let keyword = '';
       row.eachCell({ includeEmpty: false }, (cell) => {
-        if (keyword) return;
-        keyword = this.getCellText(cell);
+        const keyword = this.getCellText(cell);
+        if (this.isKeywordCellValue(keyword)) out.push(keyword);
       });
-      if (keyword) out.push(keyword);
     });
     return out;
+  }
+
+  private isKeywordCellValue(value: string): boolean {
+    const normalized = value.trim().replace(/\s+/g, ' ');
+    if (!normalized) return false;
+
+    const header = normalized.toLowerCase();
+    const headerValues = new Set([
+      'keyword',
+      'keywords',
+      'final keyword',
+      'final keywords',
+      'کلمه',
+      'کلمات',
+      'کلیدواژه',
+      'کلید واژه',
+      'عبارت',
+      'عبارات'
+    ]);
+    return !headerValues.has(header);
   }
 
   private extractKeywordBatchesFromWorkbook(workbook: ExcelJS.Workbook): KeywordSheetBatch[] {
@@ -804,15 +821,16 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     userId: number;
     keyword: string;
     maxIterations: number;
+    crawlRuntimeMs?: number;
   }): Promise<CrawlRunResult> {
     const { chatId, userId, keyword, maxIterations } = params;
     const dbOpTimeoutMs = Math.max(10000, Number(this.config.get<number>('dbOpTimeoutMs') || 120000));
     const configuredCrawlRuntimeMs = Math.max(
       60000,
-      Number(this.config.get<number>('crawlMaxRuntimeMs') || 300000)
+      Number(params.crawlRuntimeMs || this.config.get<number>('crawlMaxRuntimeMs') || 300000)
     );
     // Allow a grace window after crawl runtime for in-flight Telegram calls to settle.
-    const crawlTimeoutMs = Math.max(180000, configuredCrawlRuntimeMs + 300000);
+    const crawlTimeoutMs = Math.max(90000, configuredCrawlRuntimeMs + 60000);
 
     let searchRef = `tmp_${Date.now()}_${chatId}`;
     this.logger.log('Crawl job started', { chatId, userId, keyword, maxIterations, searchRef });
@@ -898,6 +916,94 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       const message = err instanceof Error ? err.message : String(err);
       this.logger.error('Keyword crawl failed', message);
       try {
+        const partialLinks = await this.redisStore.getClientLinks(searchRef);
+        if (partialLinks.length) {
+          const partialMatches = await this.redisStore.getAllMatches(searchRef);
+          const chatsProcessed = new Set(partialMatches.map((row) => row.channelKey).filter(Boolean)).size;
+          const iterations = Math.max(
+            0,
+            ...partialMatches.map((row) => Number(row.iterationNo || 0)).filter((n) => Number.isFinite(n))
+          );
+          const displayLinks = this.filterClientMessageLinks(partialLinks);
+          this.setInMemoryLinks(searchRef, partialLinks);
+          const numericSearchId = this.toNumericSearchId(searchRef);
+
+          if (numericSearchId) {
+            try {
+              await this.withTimeout(
+                this.searchRepo.update(numericSearchId, {
+                  results_links: JSON.stringify(partialLinks)
+                }),
+                dbOpTimeoutMs,
+                'partial_search_row_update'
+              );
+            } catch (updateErr) {
+              const updateMessage = updateErr instanceof Error ? updateErr.message : String(updateErr);
+              this.logger.warn('Partial search row update failed; using Redis results', {
+                searchRef,
+                error: updateMessage
+              });
+            }
+          }
+
+          try {
+            await this.withTimeout(
+              this.searchService.persistMatchesToOracle(searchRef),
+              dbOpTimeoutMs,
+              'partial_persistMatchesToOracle'
+            );
+          } catch (persistErr) {
+            const persistMessage = persistErr instanceof Error ? persistErr.message : String(persistErr);
+            this.logger.warn('Partial channel match persistence failed', {
+              searchRef,
+              error: persistMessage
+            });
+          }
+
+          try {
+            await this.redisStore.completeSearchRun(searchRef, {
+              keyword,
+              partial: true,
+              error: message,
+              iterations,
+              chatsProcessed,
+              messagesStored: partialMatches.length,
+              clientLinks: partialLinks.length
+            });
+          } catch {
+            // ignore redis-store failure in user path
+          }
+
+          this.logger.warn('Returning partial crawl results after failure', {
+            searchRef,
+            chatId,
+            keyword,
+            error: message,
+            matches: partialMatches.length,
+            linksFound: partialLinks.length,
+            displayLinks: displayLinks.length
+          });
+
+          return {
+            searchRef,
+            crawl: {
+              seedPublics: [],
+              links: partialLinks,
+              clientLinks: partialLinks,
+              invites: [],
+              chatsProcessed,
+              messagesStored: partialMatches.length,
+              iterations
+            },
+            resultLinks: partialLinks,
+            displayLinks
+          };
+        }
+      } catch (partialErr) {
+        const partialMessage = partialErr instanceof Error ? partialErr.message : String(partialErr);
+        this.logger.warn('Partial crawl recovery failed', { searchRef, error: partialMessage });
+      }
+      try {
         await this.redisStore.failSearchRun(searchRef, message);
       } catch {
         // ignore redis-store failure in user path
@@ -953,7 +1059,9 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
   private async findLatestCachedSearch(keyword: string): Promise<SearchEntity | null> {
     try {
-      const cacheCutoff = new Date(Date.now() - this.cachedSearchTtlMs);
+      const cacheTtlMs = Number(this.config.get<number>('searchCacheTtlMs') ?? 7 * 24 * 60 * 60 * 1000);
+      if (cacheTtlMs <= 0) return null;
+      const cacheCutoff = new Date(Date.now() - cacheTtlMs);
       const candidates = await this.searchRepo
         .createQueryBuilder('search')
         .where('search.keyword = :keyword', { keyword })
@@ -965,6 +1073,17 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       for (const candidate of candidates) {
         const dbLinks = this.parseJsonStringArray(candidate.results_links);
         if (dbLinks.length) return candidate;
+        try {
+          const redisLinks = await this.redisStore.getClientLinks(String(candidate.id));
+          if (redisLinks.length) return candidate;
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          this.logger.warn('Cached search redis lookup failed', {
+            keyword,
+            searchId: candidate.id,
+            error: message
+          });
+        }
         try {
           const tableLinks = await this.searchService.getSearchLinksBySearchId(candidate.id);
           if (tableLinks.length) return candidate;
@@ -1124,6 +1243,14 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         1,
         Number(this.config.get<number>('excelCrawlConcurrency') || 2)
       );
+      const excelCrawlRuntimeMs = Math.max(
+        60000,
+        Number(this.config.get<number>('excelCrawlMaxRuntimeMs') || 180000)
+      );
+      const excelIterations = Math.max(
+        1,
+        Math.min(maxIterations, Number(this.config.get<number>('excelCrawlIterations') || 1))
+      );
       await ctx.reply(
         `فایل اکسل دریافت شد 📄\nتعداد شیت‌ها: ${batches.length}\nتعداد کلمه‌ها: ${originalKeywordsCount}\nجستجو برای ${limitedKeywordsCount} کلمه شروع شد.`,
         this.mainMenuKeyboard
@@ -1163,7 +1290,8 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
               chatId,
               userId: user.id,
               keyword,
-              maxIterations
+              maxIterations: excelIterations,
+              crawlRuntimeMs: excelCrawlRuntimeMs
             });
             return { rows: this.buildExportRows(run.resultLinks, keyword) };
           } catch (err) {
@@ -1180,7 +1308,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       const totalTasks = tasks.length;
       const workerCount = Math.min(totalTasks, excelConcurrency);
       const shouldReportProgress = (done: number, total: number): boolean =>
-        done === 1 || done === total || done % 10 === 0;
+        done >= 1 || done === total;
 
       const workers: Array<Promise<void>> = [];
       for (let w = 0; w < workerCount; w += 1) {

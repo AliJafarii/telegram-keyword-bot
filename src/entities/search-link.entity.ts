@@ -20,6 +20,6 @@ export class SearchLinkEntity {
   @Column({ type: 'varchar', length: 32 })
   link_type!: string;
 
-  @Column({ type: 'datetime', default: () => 'CURRENT_TIMESTAMP' })
+  @Column({ default: () => 'CURRENT_TIMESTAMP' })
   created_at!: Date;
 }

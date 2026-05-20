@@ -1,4 +1,18 @@
 import { Injectable } from '@nestjs/common';
+
+// Simple rate limiter to avoid Telegram flood waits
+class RateLimiter {
+  private lastRequestAt = 0;
+  constructor(private readonly minIntervalMs: number) {}
+  async wait(): Promise<void> {
+    const now = Date.now();
+    const elapsed = now - this.lastRequestAt;
+    if (elapsed < this.minIntervalMs) {
+      await new Promise((resolve) => setTimeout(resolve, this.minIntervalMs - elapsed));
+    }
+    this.lastRequestAt = Date.now();
+  }
+}
 import { TelegramClient, Api } from 'telegram';
 import { StringSession } from 'telegram/sessions';
 import { ConfigService } from '@nestjs/config';
@@ -55,9 +69,28 @@ interface CrawlRunOptions {
   abortSignal?: AbortSignal;
 }
 
+interface MessageMediaMetadata extends Record<string, unknown> {
+  type?: string;
+  mimeType?: string;
+  size?: number;
+  fileName?: string;
+  duration?: number;
+  width?: number;
+  height?: number;
+  title?: string;
+  performer?: string;
+  voice?: boolean;
+  roundMessage?: boolean;
+  supportsStreaming?: boolean;
+}
+
 @Injectable()
 export class SearchService {
   private readonly client: TelegramClient;
+  private readonly apiRateLimiter: RateLimiter;
+  private readonly inputPeerCache = new Map<string, Promise<Api.TypeInputPeer>>();
+  private readonly historyPageCache = new Map<string, { createdAt: number; messages: Api.Message[] }>();
+  private readonly chatBioLinksCache = new Map<string, Promise<string[]>>();
   private sessionLoaded = false;
   private sessionInitPromise: Promise<void> | null = null;
   private channelMatchSchemaMode: 'unknown' | 'extended' | 'legacy' = 'unknown';
@@ -75,6 +108,10 @@ export class SearchService {
     @InjectRepository(SearchLinkEntity)
     private readonly searchLinkRepo: Repository<SearchLinkEntity>
   ) {
+    // Rate limiter: minimum interval between Telegram API calls to avoid flood waits
+    const rateLimitIntervalMs = Math.max(200, Number(this.config.get<number>('crawlRateLimitMs') || 2000));
+    this.apiRateLimiter = new RateLimiter(rateLimitIntervalMs);
+
     const proxyUrl = process.env.SOCKS_PROXY;
     const proxy = proxyUrl
       ? { ip: '127.0.0.1', port: 10808, socksType: 5 as 5 }
@@ -473,6 +510,64 @@ export class SearchService {
     return false;
   }
 
+  private fuzzyWindowIncludes(tokens: string[], term: string, maxDistance: number): boolean {
+    if (!tokens.length || !term || maxDistance <= 0) return false;
+    const maxWindow = Math.min(tokens.length, Math.max(1, Math.ceil(term.length / 2)));
+    for (let start = 0; start < tokens.length; start += 1) {
+      let joined = '';
+      for (let size = 1; size <= maxWindow && start + size <= tokens.length; size += 1) {
+        joined += tokens[start + size - 1];
+        if (Math.abs(joined.length - term.length) > maxDistance) continue;
+        if (this.levenshteinWithin(joined, term, maxDistance)) return true;
+      }
+    }
+    return false;
+  }
+
+  private hasEmojiLikeContent(text: string): boolean {
+    return /[\p{Emoji_Presentation}\p{Extended_Pictographic}\uFE0F]/u.test(text);
+  }
+
+  private isMostlyEmojiOrSymbols(text: string): boolean {
+    const normalized = text.replace(/\s+/g, '');
+    if (!normalized) return false;
+    const withoutEmoji = normalized.replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}\uFE0F\u200D]/gu, '');
+    return withoutEmoji.replace(/[\p{P}\p{S}]/gu, '').length === 0;
+  }
+
+  private hasMediaTitleContext(text: string): boolean {
+    const tokens = new Set(this.tokenizeForSearch(text));
+    return [
+      'سریال',
+      'فیلم',
+      'فصل',
+      'قسمت',
+      'دانلود',
+      'لینک',
+      'قرار',
+      'اپیزود',
+      'episode',
+      'season',
+      'series',
+      'movie'
+    ].some((token) => tokens.has(token));
+  }
+
+  private containsEmojiObfuscatedKeyword(text: string, keywordTerms: string[]): boolean {
+    if (!this.config.get<boolean>('crawlFuzzyEmojiWildcard')) return false;
+    if (!this.hasEmojiLikeContent(text) || !this.hasMediaTitleContext(text)) return false;
+    const compactKeyword = keywordTerms.map((term) => this.compactForSearch(term)).join('');
+    if (compactKeyword.length < 3) return false;
+
+    const quoteMatches = Array.from(text.matchAll(/[«"'“”‘’](.*?)[»"'“”‘’]/gs));
+    for (const match of quoteMatches) {
+      const inner = String(match[1] || '');
+      if (this.isMostlyEmojiOrSymbols(inner)) return true;
+    }
+
+    return /(?:[\p{Emoji_Presentation}\p{Extended_Pictographic}\uFE0F]\s*){2,}/u.test(text);
+  }
+
   private tokenizeForSearch(text: string): string[] {
     return this.normalizeForSearch(text).match(/[\p{L}\p{N}]+/gu) || [];
   }
@@ -490,6 +585,7 @@ export class SearchService {
 
   private messageContainsKeyword(text: string, keywordTerms: string[]): boolean {
     if (!keywordTerms.length) return false;
+    if (this.containsEmojiObfuscatedKeyword(text, keywordTerms)) return true;
     const normalizedTokens = this.tokenizeForSearch(text).filter(Boolean);
     if (!normalizedTokens.length) return false;
     const compactText = normalizedTokens.join('');
@@ -499,6 +595,13 @@ export class SearchService {
     const fuzzyEnabled = this.config.get<boolean>('crawlFuzzyEnabled') !== false;
     const fuzzyMinLen = Math.max(1, Number(this.config.get<number>('crawlFuzzyMinTermLength') || 4));
     const fuzzyMaxDistanceCfg = Math.max(0, Number(this.config.get<number>('crawlFuzzyMaxDistance') || 1));
+    const joinedTerm = terms.join('');
+    if (compactText.includes(joinedTerm)) return true;
+    if (fuzzyEnabled && joinedTerm.length >= fuzzyMinLen && fuzzyMaxDistanceCfg > 0) {
+      const adaptiveDistance = Math.max(1, Math.floor(joinedTerm.length * 0.25));
+      const maxDistance = Math.min(fuzzyMaxDistanceCfg, adaptiveDistance);
+      if (this.fuzzyWindowIncludes(normalizedTokens, joinedTerm, maxDistance)) return true;
+    }
 
     return terms.every((part) => {
       if (compactText.includes(part)) return true;
@@ -510,7 +613,8 @@ export class SearchService {
       const maxDistance = Math.min(fuzzyMaxDistanceCfg, adaptiveDistance);
       if (maxDistance <= 0) return false;
 
-      return this.fuzzyIncludes(normalizedTokens, part, maxDistance);
+      return this.fuzzyIncludes(normalizedTokens, part, maxDistance)
+        || this.fuzzyWindowIncludes(normalizedTokens, part, maxDistance);
     });
   }
 
@@ -571,10 +675,91 @@ export class SearchService {
     return false;
   }
 
+  private extractMediaMetadata(msgAny: any): MessageMediaMetadata | undefined {
+    const media = msgAny?.media;
+    if (!media) return undefined;
+
+    const document = media?.document || media;
+    const attrs = Array.isArray(document?.attributes)
+      ? document.attributes
+      : Array.isArray(media?.attributes)
+        ? media.attributes
+        : [];
+
+    const metadata: MessageMediaMetadata = {
+      type: String(media?._ || media?.className || media?.constructor?.name || '').replace(/^MessageMedia/i, '') || undefined,
+      mimeType: document?.mimeType || media?.mimeType || undefined,
+      size: Number.isFinite(Number(document?.size)) ? Number(document.size) : undefined
+    };
+
+    for (const attr of attrs) {
+      const attrType = String(attr?._ || attr?.className || attr?.constructor?.name || '').toLowerCase();
+      if (typeof attr?.fileName === 'string' && attr.fileName.trim()) metadata.fileName = attr.fileName.trim();
+      if (typeof attr?.duration === 'number') metadata.duration = attr.duration;
+      if (typeof attr?.w === 'number') metadata.width = attr.w;
+      if (typeof attr?.h === 'number') metadata.height = attr.h;
+      if (typeof attr?.title === 'string' && attr.title.trim()) metadata.title = attr.title.trim();
+      if (typeof attr?.performer === 'string' && attr.performer.trim()) metadata.performer = attr.performer.trim();
+      if (typeof attr?.voice === 'boolean') metadata.voice = attr.voice;
+      if (typeof attr?.roundMessage === 'boolean') metadata.roundMessage = attr.roundMessage;
+      if (typeof attr?.supportsStreaming === 'boolean') metadata.supportsStreaming = attr.supportsStreaming;
+      if (attrType.includes('documentattributevideo') && metadata.type === undefined) metadata.type = 'Video';
+      if (attrType.includes('documentattributeaudio') && metadata.type === undefined) metadata.type = 'Audio';
+    }
+
+    const hasValue = Object.values(metadata).some((value) => value !== undefined && value !== '');
+    return hasValue ? metadata : undefined;
+  }
+
+  private mediaMetadataToText(metadata?: MessageMediaMetadata): string {
+    if (!metadata) return '';
+    return [
+      metadata.fileName,
+      metadata.title,
+      metadata.performer,
+      metadata.mimeType,
+      metadata.type
+    ].filter(Boolean).join(' ');
+  }
+
+  private buildMetadataQueries(metadata?: MessageMediaMetadata): string[] {
+    if (!metadata) return [];
+    const candidates = new Set<string>();
+    const add = (value?: string) => {
+      const normalized = String(value || '')
+        .replace(/\.[A-Za-z0-9]{1,6}$/g, ' ')
+        .replace(/[._\-()[\]{}]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (normalized.length >= 3) candidates.add(normalized);
+    };
+
+    add(metadata.fileName);
+    add(metadata.title);
+    if (metadata.title && metadata.performer) add(metadata.performer + ' ' + metadata.title);
+
+    const text = [metadata.fileName, metadata.title, metadata.performer].filter(Boolean).join(' ');
+    for (const token of this.tokenizeForSearch(text)) {
+      if (token.length >= 4 && !/^\d+$/.test(token)) candidates.add(token);
+    }
+
+    return Array.from(candidates).slice(0, 6);
+  }
+
   private async joinInviteIfNeeded(link: string, abortSignal?: AbortSignal): Promise<Api.TypeChat | null> {
     const hash = this.parseInviteHash(link);
     if (!hash) return null;
     try {
+      const checked: any = await this.invokeWithTimeout(
+        this.client.invoke(
+          new Api.messages.CheckChatInvite({ hash } as any)
+        ),
+        15000,
+        'iterative_check_chat_invite',
+        abortSignal
+      );
+      if (checked?.chat) return checked.chat as Api.TypeChat;
+
       const res: any = await this.invokeWithTimeout(
         this.client.invoke(
           new Api.messages.ImportChatInvite({ hash } as any)
@@ -587,6 +772,10 @@ export class SearchService {
     } catch (err) {
       this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
       const message = err instanceof Error ? err.message : String(err);
+      if (this.isAlreadyJoinedResult(message)) {
+        this.logger.log('ImportChatInvite already joined', { link, result: message });
+        return null;
+      }
       this.logger.warn('ImportChatInvite failed', { link, error: message });
     }
     return null;
@@ -945,13 +1134,41 @@ export class SearchService {
     }
   }
 
+  private async getInputPeerForChat(
+    chat: Api.TypeChat,
+    chatKey: string,
+    label: string,
+    abortSignal?: AbortSignal
+  ): Promise<Api.TypeInputPeer> {
+    const existing = this.inputPeerCache.get(chatKey);
+    if (existing) return existing;
+
+    const promise = this.invokeWithTimeout(
+      this.client.getInputEntity(chat) as Promise<Api.TypeInputPeer>,
+      15000,
+      label,
+      abortSignal
+    );
+    this.inputPeerCache.set(chatKey, promise);
+    return promise;
+  }
+
   private async fetchHistoryPage(
     peer: Api.TypeInputPeer,
     offsetId: number,
     limit: number,
     timeoutMs: number,
-    abortSignal?: AbortSignal
+    abortSignal?: AbortSignal,
+    cacheKey?: string
   ): Promise<Api.Message[]> {
+    const now = Date.now();
+    if (cacheKey) {
+      const cached = this.historyPageCache.get(cacheKey);
+      if (cached && now - cached.createdAt < 60 * 60 * 1000) {
+        return cached.messages;
+      }
+    }
+
     const hist = await this.invokeWithTimeout(
       this.client.invoke(
         new Api.messages.GetHistory({
@@ -969,7 +1186,15 @@ export class SearchService {
       abortSignal
     );
     const histAny = hist as any;
-    return (histAny.messages || []).filter((m: any) => Boolean(m?.message)) as Api.Message[];
+    const messages = (histAny.messages || []).filter((m: any) => Boolean(m?.message)) as Api.Message[];
+    if (cacheKey) {
+      this.historyPageCache.set(cacheKey, { createdAt: now, messages });
+      if (this.historyPageCache.size > 5000) {
+        const keysToDelete = Array.from(this.historyPageCache.keys()).slice(0, 1000);
+        for (const key of keysToDelete) this.historyPageCache.delete(key);
+      }
+    }
+    return messages;
   }
 
   private normalizeAbortReason(reason: unknown, label: string): Error {
@@ -992,6 +1217,13 @@ export class SearchService {
     abortSignal?: AbortSignal
   ): Promise<T> {
     this.throwIfAborted(abortSignal, label);
+    const startedAt = Date.now();
+    const guardedPromise = promise.then(
+      (value) => ({ ok: true as const, value }),
+      (err) => ({ ok: false as const, err })
+    );
+    // Rate limit before any Telegram API call to avoid flood waits
+    await this.apiRateLimiter.wait();
 
     return new Promise<T>((resolve, reject) => {
       let settled = false;
@@ -999,6 +1231,10 @@ export class SearchService {
       const finish = (handler: () => void) => {
         if (settled) return;
         settled = true;
+        const elapsedMs = Date.now() - startedAt;
+        if (elapsedMs >= 5000) {
+          this.logger.warn('Slow Telegram API call', { label, elapsedMs, timeoutMs });
+        }
         if (timer) clearTimeout(timer);
         if (abortSignal) {
           abortSignal.removeEventListener('abort', onAbort);
@@ -1018,10 +1254,13 @@ export class SearchService {
         finish(() => reject(new Error(`${label} timeout after ${timeoutMs}ms`)));
       }, timeoutMs);
 
-      promise.then(
-        (value) => finish(() => resolve(value)),
-        (err) => finish(() => reject(err))
-      );
+      guardedPromise.then((result) => {
+        if (result.ok) {
+          finish(() => resolve(result.value));
+        } else {
+          finish(() => reject(result.err));
+        }
+      });
     });
   }
 
@@ -1234,13 +1473,15 @@ export class SearchService {
       messageLink?: string;
       messageId: number;
       messageDate?: number;
-      matchReason?: 'keyword_hyperlink' | 'keyword_video';
+      matchReason?: 'keyword_hyperlink' | 'keyword_video' | 'keyword_metadata';
       iterationNo?: number;
       discoveredViaLink?: string;
       discoveredFromMessageLink?: string;
       discoveredFromChannel?: string;
       messageText: string;
       relatedLinks: string[];
+      mediaMetadata?: { [key: string]: unknown };
+      metadataQuery?: string;
     },
     channel: string
   ): Record<string, unknown> | null {
@@ -1259,6 +1500,8 @@ export class SearchService {
     const colDiscoveredViaLink = this.resolveTableColumn(meta, 'discovered_via_link');
     const colDiscoveredFromMessageLink = this.resolveTableColumn(meta, 'discovered_from_message_link');
     const colDiscoveredFromChannel = this.resolveTableColumn(meta, 'discovered_from_channel');
+    const colMediaMetadata = this.resolveTableColumn(meta, 'media_metadata');
+    const colMetadataQuery = this.resolveTableColumn(meta, 'metadata_query');
     if (!colChannel || !colMessageId) return null;
 
     const values: Record<string, unknown> = {
@@ -1287,6 +1530,8 @@ export class SearchService {
     if (colDiscoveredViaLink) values[colDiscoveredViaLink] = row.discoveredViaLink || null;
     if (colDiscoveredFromMessageLink) values[colDiscoveredFromMessageLink] = row.discoveredFromMessageLink || null;
     if (colDiscoveredFromChannel) values[colDiscoveredFromChannel] = row.discoveredFromChannel || null;
+    if (colMediaMetadata) values[colMediaMetadata] = row.mediaMetadata ? JSON.stringify(row.mediaMetadata) : null;
+    if (colMetadataQuery) values[colMetadataQuery] = row.metadataQuery || null;
     if (colLinks) {
       const includeMessageLinkInLinks = !colMessageLink;
       const payload = mode === 'extended'
@@ -1480,7 +1725,9 @@ export class SearchService {
             ? this.truncateVarchar(row.discoveredFromChannel, 128)
             : null,
           text: row.messageText || null,
-          links: this.truncateVarchar(JSON.stringify(relatedLinks), 4000)
+          links: this.truncateVarchar(JSON.stringify(relatedLinks), 4000),
+          media_metadata: row.mediaMetadata ? JSON.stringify(row.mediaMetadata) : null,
+          metadata_query: row.metadataQuery ? this.truncateVarchar(row.metadataQuery, 256) : null
         };
 
         if (existing) {
@@ -1565,7 +1812,15 @@ export class SearchService {
     const pageSize = Math.max(1, Number(this.config.get<number>('crawlSearchPageSize') || 20));
     const maxPagesPerChat = Math.max(
       1,
-      Number(this.config.get<number>('crawlSearchPagesPerChat') || 30)
+      Number(this.config.get<number>('crawlSearchPagesPerChat') || 10)
+    );
+    const maxChatsPerIteration = Math.max(
+      5,
+      Number(this.config.get<number>('crawlMaxChatsPerIteration') || 15)
+    );
+    const maxLinksPerIteration = Math.max(
+      10,
+      Number(this.config.get<number>('crawlMaxLinksPerIteration') || 80)
     );
     const maxStored = Math.max(1, Number(this.config.get<number>('crawlMsgLimit') || 1000));
     const maxRuntimeMs = Math.max(60000, Number(this.config.get<number>('crawlMaxRuntimeMs') || 300000));
@@ -1576,6 +1831,33 @@ export class SearchService {
     const startBots = this.config.get<boolean>('crawlStartBots') === true;
     const leaveJoinedPrivate = this.config.get<boolean>('crawlLeaveJoinedPrivate') !== false;
     const allowVideoCaptionWithoutLink = this.config.get<boolean>('crawlAllowVideoCaptionWithoutLink') !== false;
+    const metadataExpansion = this.config.get<boolean>('crawlMetadataExpansion') !== false;
+    const maxMetadataQueries = Math.max(0, Number(this.config.get<number>('crawlMetadataMaxQueries') || 25));
+    const botBioLinksCache = new Map<string, Promise<string[]>>();
+    const resolvedTargetCache = new Map<string, Promise<Api.TypeChat | null>>();
+    const getCachedBotBioLinks = (username: string): Promise<string[]> => {
+      const key = username.toLowerCase();
+      const existing = botBioLinksCache.get(key);
+      if (existing) return existing;
+      const promise = this.extractBotBioLinks(username, searchId, abortSignal);
+      botBioLinksCache.set(key, promise);
+      return promise;
+    };
+    const resolveCachedTarget = (parsed: ParsedTargetLink): Promise<Api.TypeChat | null> => {
+      const key = parsed.canonical;
+      const existing = resolvedTargetCache.get(key);
+      if (existing) return existing;
+      const promise = this.resolveParsedLinkForFrontier({
+        parsed,
+        autoJoinInvites,
+        keywordTerms,
+        searchId,
+        joinedPrivateChats,
+        abortSignal
+      });
+      resolvedTargetCache.set(key, promise);
+      return promise;
+    };
     const maxIterations = Math.max(
       1,
       Number(
@@ -1649,6 +1931,8 @@ export class SearchService {
     const discoveredLinks = new Set<string>();
     const clientLinks = new Set<string>();
     const discoveredInvites = new Set<string>();
+    const metadataQueries = new Set<string>();
+    const processedMetadataQueries = new Set<string>();
     for (const chat of seedChats.values()) {
       const username = 'username' in chat ? chat.username : undefined;
       if (!username) continue;
@@ -1721,8 +2005,18 @@ export class SearchService {
         discoveredFromChannel?: string;
       }>();
 
+      let chatsThisIteration = 0;
       for (const frontierItem of frontier) {
         this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
+        if (chatsThisIteration >= maxChatsPerIteration) {
+          await this.logStep(searchId, 'iterative_chats_cap_reached', {
+            iteration: iterations,
+            chatsThisIteration,
+            maxChatsPerIteration,
+            remainingInFrontier: frontier.length - chatsThisIteration
+          });
+          break;
+        }
         const chat = frontierItem.chat;
         if (Date.now() > deadlineAt) {
           await this.logStep(searchId, 'iterative_runtime_timeout_in_round', {
@@ -1746,6 +2040,7 @@ export class SearchService {
         if (!chatKey || visitedChats.has(chatKey)) continue;
         visitedChats.add(chatKey);
         chatsProcessed += 1;
+        chatsThisIteration += 1;
 
         await this.logStep(searchId, 'iterative_chat_start', {
           iteration: iterations,
@@ -1767,12 +2062,7 @@ export class SearchService {
 
         let inputPeer: Api.TypeInputPeer;
         try {
-          inputPeer = await this.invokeWithTimeout(
-            this.client.getInputEntity(chat) as Promise<Api.TypeInputPeer>,
-            15000,
-            'iterative_chat_input_peer',
-            abortSignal
-          );
+          inputPeer = await this.getInputPeerForChat(chat, chatKey, 'iterative_chat_input_peer', abortSignal);
         } catch (err) {
           this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
           const message = err instanceof Error ? err.message : String(err);
@@ -1813,7 +2103,8 @@ export class SearchService {
               offsetId,
               pageSize,
               15000,
-              abortSignal
+              abortSignal,
+              chatKey + ':' + offsetId + ':' + pageSize
             );
           } catch (err) {
             this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
@@ -1834,12 +2125,8 @@ export class SearchService {
                   pages
                 });
                 try {
-                  inputPeer = await this.invokeWithTimeout(
-                    this.client.getInputEntity(chat) as Promise<Api.TypeInputPeer>,
-                    15000,
-                    'iterative_chat_input_peer_retry',
-                    abortSignal
-                  );
+                  this.inputPeerCache.delete(chatKey);
+                  inputPeer = await this.getInputPeerForChat(chat, chatKey, 'iterative_chat_input_peer_retry', abortSignal);
                 } catch (retryErr) {
                   this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
                   const retryMessage = retryErr instanceof Error ? retryErr.message : String(retryErr);
@@ -1874,7 +2161,11 @@ export class SearchService {
           for (const msg of msgs) {
             const msgAny = msg as any;
             const text = String(msgAny.message || '');
-            const messageKeywordMatch = this.messageContainsKeyword(text, keywordTerms);
+            const mediaMetadata = this.extractMediaMetadata(msgAny);
+            const metadataText = this.mediaMetadataToText(mediaMetadata);
+            const textKeywordMatch = this.messageContainsKeyword(text, keywordTerms);
+            const metadataKeywordMatch = metadataExpansion && this.messageContainsKeyword(metadataText, keywordTerms);
+            const messageKeywordMatch = textKeywordMatch || metadataKeywordMatch;
             if (!messageKeywordMatch) continue;
 
             const chatType = this.classifyChatType(chat);
@@ -1889,7 +2180,8 @@ export class SearchService {
               !selfPublicLink || normalized !== selfPublicLink
             );
             const videoCaptionMatch = allowVideoCaptionWithoutLink && this.isVideoOrClipMessage(msgAny);
-            if (!filteredLinks.length && !videoCaptionMatch) continue;
+            const metadataMediaMatch = metadataKeywordMatch && Boolean(mediaMetadata);
+            if (!filteredLinks.length && !videoCaptionMatch && !metadataMediaMatch) continue;
 
             if (filteredLinks.length) {
               for (const normalized of filteredLinks) {
@@ -1904,9 +2196,18 @@ export class SearchService {
               }
             }
 
-            const matchReason: 'keyword_hyperlink' | 'keyword_video' = filteredLinks.length
+            if (metadataExpansion && mediaMetadata && metadataQueries.size < maxMetadataQueries) {
+              for (const query of this.buildMetadataQueries(mediaMetadata)) {
+                if (metadataQueries.size >= maxMetadataQueries) break;
+                if (!this.messageContainsKeyword(query, keywordTerms)) metadataQueries.add(query);
+              }
+            }
+
+            const matchReason: 'keyword_hyperlink' | 'keyword_video' | 'keyword_metadata' = filteredLinks.length
               ? 'keyword_hyperlink'
-              : 'keyword_video';
+              : metadataMediaMatch
+                ? 'keyword_metadata'
+                : 'keyword_video';
 
             try {
               await this.redisStore.upsertMatch({
@@ -1925,7 +2226,9 @@ export class SearchService {
                 discoveredViaLink: frontierItem.discoveredViaLink,
                 discoveredFromMessageLink: frontierItem.discoveredFromMessageLink,
                 discoveredFromChannel: frontierItem.discoveredFromChannel,
-                relatedLinks: filteredLinks
+                relatedLinks: filteredLinks,
+                mediaMetadata,
+                metadataQuery: metadataKeywordMatch ? keyword : undefined
               });
             } catch (err) {
               const message = err instanceof Error ? err.message : String(err);
@@ -1951,7 +2254,12 @@ export class SearchService {
           offsetId = lastId;
         }
 
-        const bioLinks = await this.extractChatBioLinks(chat, searchId, abortSignal);
+        let bioLinksPromise = this.chatBioLinksCache.get(chatKey);
+        if (!bioLinksPromise) {
+          bioLinksPromise = this.extractChatBioLinks(chat, searchId, abortSignal);
+          this.chatBioLinksCache.set(chatKey, bioLinksPromise);
+        }
+        const bioLinks = await bioLinksPromise;
         for (const bioLink of bioLinks) {
           if (selfPublicLink && bioLink === selfPublicLink) continue;
           discoveredLinks.add(bioLink);
@@ -1973,8 +2281,29 @@ export class SearchService {
       }
 
       const nextFrontierMap = new Map<string, FrontierChatState>();
+      let linksProcessedThisIteration = 0;
       for (const [link, origin] of linksFromIteration.entries()) {
         this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
+        if (Date.now() > deadlineAt) {
+          await this.logStep(searchId, 'iterative_runtime_timeout_in_links', {
+            maxRuntimeMs,
+            elapsedMs: Date.now() - startedAt,
+            iteration: iterations,
+            linksProcessedThisIteration,
+            linksPending: linksFromIteration.size - linksProcessedThisIteration
+          });
+          break;
+        }
+        if (linksProcessedThisIteration >= maxLinksPerIteration) {
+          await this.logStep(searchId, 'iterative_links_cap_reached', {
+            iteration: iterations,
+            linksProcessedThisIteration,
+            maxLinksPerIteration,
+            linksPending: linksFromIteration.size - linksProcessedThisIteration
+          });
+          break;
+        }
+        linksProcessedThisIteration += 1;
         if (processedLinks.has(link)) continue;
         processedLinks.add(link);
         const parsed = this.parseTargetLink(link);
@@ -1990,8 +2319,10 @@ export class SearchService {
             }
           }
           if (parsed.username) {
-            const botBioLinks = await this.extractBotBioLinks(parsed.username, searchId, abortSignal);
+            const botBioLinks = await getCachedBotBioLinks(parsed.username);
             for (const botBioLink of botBioLinks) {
+              this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
+              if (Date.now() > deadlineAt) break;
               if (processedLinks.has(botBioLink)) continue;
               processedLinks.add(botBioLink);
               discoveredLinks.add(botBioLink);
@@ -2004,14 +2335,7 @@ export class SearchService {
                 clientLinks.add(parsedBio.canonical);
                 continue;
               }
-              const resolvedBio = await this.resolveParsedLinkForFrontier({
-                parsed: parsedBio,
-                autoJoinInvites,
-                keywordTerms,
-                searchId,
-                joinedPrivateChats,
-                abortSignal
-              });
+              const resolvedBio = await resolveCachedTarget(parsedBio);
               if (!resolvedBio) continue;
 
               const bioKey = this.getChatKey(resolvedBio);
@@ -2027,14 +2351,7 @@ export class SearchService {
           continue;
         }
 
-        const resolved = await this.resolveParsedLinkForFrontier({
-          parsed,
-          autoJoinInvites,
-          keywordTerms,
-          searchId,
-          joinedPrivateChats,
-          abortSignal
-        });
+        const resolved = await resolveCachedTarget(parsed);
         if (!resolved) continue;
 
         const key = this.getChatKey(resolved);
@@ -2045,6 +2362,70 @@ export class SearchService {
           discoveredFromMessageLink: origin.discoveredFromMessageLink,
           discoveredFromChannel: origin.discoveredFromChannel
         });
+      }
+
+      if (metadataExpansion && metadataQueries.size) {
+        for (const metadataQuery of metadataQueries) {
+          this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
+          if (Date.now() > deadlineAt) break;
+          if (processedMetadataQueries.has(metadataQuery)) continue;
+          processedMetadataQueries.add(metadataQuery);
+
+          const addMetadataSeed = (chat: Api.TypeChat) => {
+            const key = this.getChatKey(chat);
+            if (!key || visitedChats.has(key) || nextFrontierMap.has(key)) return;
+            nextFrontierMap.set(key, {
+              chat,
+              discoveredViaLink: 'metadata:' + metadataQuery,
+              discoveredFromChannel: 'metadata'
+            });
+          };
+
+          try {
+            const byName = await this.invokeWithTimeout(
+              this.client.invoke(new Api.contacts.Search({ q: metadataQuery, limit: seedLimit })),
+              20000,
+              'metadata_seed_contacts_search',
+              abortSignal
+            );
+            for (const chat of byName.chats || []) addMetadataSeed(chat);
+            for (const user of (byName as any).users || []) addMetadataSeed(user as Api.TypeChat);
+          } catch (err) {
+            this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
+            const message = err instanceof Error ? err.message : String(err);
+            await this.logStep(searchId, 'metadata_seed_contacts_error', { query: metadataQuery, error: message });
+          }
+
+          try {
+            const global = await this.invokeWithTimeout(
+              this.client.invoke(
+                new Api.messages.SearchGlobal({
+                  q: metadataQuery,
+                  offsetDate: 0 as any,
+                  offsetPeer: new Api.InputPeerEmpty(),
+                  offsetId: 0 as any,
+                  limit: seedLimit,
+                  filter: new Api.InputMessagesFilterEmpty()
+                } as any)
+              ),
+              20000,
+              'metadata_seed_global_search',
+              abortSignal
+            );
+            const globalAny = global as any;
+            for (const chat of globalAny.chats || []) addMetadataSeed(chat);
+            for (const user of globalAny.users || []) addMetadataSeed(user as Api.TypeChat);
+          } catch (err) {
+            this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
+            const message = err instanceof Error ? err.message : String(err);
+            await this.logStep(searchId, 'metadata_seed_global_error', { query: metadataQuery, error: message });
+          }
+
+          await this.logStep(searchId, 'metadata_seed_done', {
+            query: metadataQuery,
+            nextFrontier: nextFrontierMap.size
+          });
+        }
       }
 
       frontier = Array.from(nextFrontierMap.values()).sort((a, b) =>
