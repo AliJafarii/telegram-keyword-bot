@@ -23,6 +23,21 @@ export const typeOrmConfig = (config: ConfigService): TypeOrmModuleOptions => {
     };
   }
 
+  if (databaseType === 'postgres') {
+    return {
+      type: 'postgres',
+      host: config.get<string>('postgresHost') || '127.0.0.1',
+      port: Number(config.get<number>('postgresPort') || 5432),
+      database: config.get<string>('postgresDatabase') || 'telegram_keyword_bot',
+      username: config.get<string>('postgresUser') || 'telegram_keyword_bot',
+      password: config.get<string>('postgresPassword') || '',
+      ssl: config.get<boolean>('postgresSsl') ? { rejectUnauthorized: false } : false,
+      synchronize: config.get<boolean>('postgresSynchronize') !== false,
+      logging: false,
+      entities
+    };
+  }
+
   return {
     type: 'sqlite',
     database: config.get<string>('sqliteDatabase') || '/root/telegram-keyword-bot/data/telegram-keyword-bot.sqlite',

@@ -12,6 +12,6 @@ export class UserEntity {
   @Column({ type: 'varchar', length: 128, nullable: true })
   username?: string;
 
-  @Column({ type: 'datetime', default: () => 'CURRENT_TIMESTAMP' })
+  @Column({ default: () => 'CURRENT_TIMESTAMP' })
   created_at!: Date;
 }

@@ -25,7 +25,7 @@ export class ChannelMatchEntity {
   @Column({ type: 'integer', nullable: true })
   message_id?: number;
 
-  @Column({ type: 'datetime', nullable: true })
+  @Column({ nullable: true })
   date?: Date;
 
   @Column({ type: 'varchar', length: 32, nullable: true })
@@ -49,4 +49,10 @@ export class ChannelMatchEntity {
 
   @Column({ name: 'LINKS', type: 'varchar', length: 4000, nullable: true })
   links?: string;
+
+  @Column({ type: 'text', nullable: true })
+  media_metadata?: string;
+
+  @Column({ type: 'varchar', length: 256, nullable: true })
+  metadata_query?: string;
 }

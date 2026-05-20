@@ -43,6 +43,6 @@ export class SearchEntity {
   @Column({ name: 'RESULTS_INVITES', type: 'text', nullable: true })
   results_invites?: string;
 
-  @Column({ type: 'datetime', default: () => 'CURRENT_TIMESTAMP' })
+  @Column({ default: () => 'CURRENT_TIMESTAMP' })
   created_at!: Date;
 }
