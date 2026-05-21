@@ -43,6 +43,35 @@ interface FoundMessage {
   };
 }
 
+interface InviteMeta {
+  link: string;
+  hash?: string;
+  title?: string;
+  uid?: string;
+  username?: string;
+  source: 'checked' | 'joined' | 'error' | 'unknown';
+  error?: string;
+}
+
+interface SourceCrawlMatch {
+  targetUid?: string;
+  targetTitle?: string;
+  targetLinks: string[];
+  privateInviteLink: string;
+  privateInviteMeta?: InviteMeta;
+  query: string;
+  matchReason: string;
+  confidence: FoundMessage['confidence'];
+  sourceType: string;
+  sourceTitle: string;
+  sourceUsername?: string;
+  sourceLink?: string;
+  messageId: number;
+  messageLink?: string;
+  text: string;
+  extractedLinks: string[];
+}
+
 type SocksProxyConfig = { ip: string; port: number; socksType: 4 | 5 };
 
 function parseArgs() {
@@ -262,6 +291,262 @@ function parseBotStartLink(link: string): { username: string; command: string } 
   }
 }
 
+function isPrivateInviteLink(link: string): boolean {
+  const normalized = normalizeTelegramLink(link);
+  return /^https:\/\/t\.me\/(?:\+[A-Za-z0-9_-]+|joinchat\/[A-Za-z0-9_-]+)/i.test(normalized);
+}
+
+function inviteHash(link: string): string | undefined {
+  const normalized = normalizeTelegramLink(link);
+  const match = normalized.match(/^https:\/\/t\.me\/(?:\+|joinchat\/)([A-Za-z0-9_-]+)/i);
+  return match?.[1];
+}
+
+function privateMessageUid(link: string): string | undefined {
+  return normalizeTelegramLink(link).match(/^https:\/\/t\.me\/c\/([0-9]+)(?:\/|$)/i)?.[1];
+}
+
+function targetUids(target: TargetRecord): string[] {
+  return Array.from(new Set([
+    target.uid,
+    ...(target.privateMessages || []).map((item) => item.uid),
+    ...target.links.map(privateMessageUid)
+  ].filter((item): item is string => Boolean(item))));
+}
+
+function titleOverlapScore(left?: string, right?: string): number {
+  if (!left || !right) return 0;
+  const weak = new Set(['دانلود', 'رایگان', 'کانال', 'گروه', 'فیلم', 'سریال', 'ایرانی', 'خارجی', 'قسمت', 'فصل']);
+  const leftTokens = new Set(tokenize(left).filter((token) => token.length >= 3 && !weak.has(token)));
+  const rightTokens = tokenize(right).filter((token) => token.length >= 3 && !weak.has(token));
+  return rightTokens.filter((token) => leftTokens.has(token)).length;
+}
+
+function titleSignalTokenCount(text?: string): number {
+  if (!text) return 0;
+  const weak = new Set(['دانلود', 'رایگان', 'کانال', 'گروه', 'فیلم', 'سریال', 'ایرانی', 'خارجی', 'قسمت', 'فصل']);
+  return tokenize(text).filter((token) => token.length >= 3 && !weak.has(token)).length;
+}
+
+function sourceMessageMatchesTitle(text: string, target: TargetRecord): boolean {
+  if (!target.title) return false;
+  const normalized = normalizeText(text);
+  const tokens = tokenize(target.title).filter((token) => token.length >= 3);
+  if (!tokens.length) return false;
+  const hits = tokens.filter((token) => normalized.includes(token)).length;
+  return hits >= Math.min(2, tokens.length);
+}
+
+function sourceCrawlMatchReason(target: TargetRecord, inviteLink: string, meta: InviteMeta | undefined, text: string): string | null {
+  const normalizedInvite = normalizeTelegramLink(inviteLink);
+  const normalizedTargets = target.links.map(normalizeTelegramLink);
+  if (normalizedTargets.includes(normalizedInvite)) return 'exact_private_invite_link';
+
+  const candidateUid = privateMessageUid(normalizedInvite) || meta?.uid;
+  const uids = targetUids(target);
+  if (candidateUid && uids.includes(candidateUid)) return 'exact_private_uid';
+
+  const targetTitleSignals = titleSignalTokenCount(target.title);
+  if (targetTitleSignals && target.title && meta?.title && titleOverlapScore(meta.title, target.title) >= Math.min(2, targetTitleSignals)) {
+    return 'joined_or_checked_title_overlap';
+  }
+  if (sourceMessageMatchesTitle(text, target)) return 'source_message_title_terms';
+  if (target.uid && normalizeText(text).includes(target.uid)) return 'source_message_uid_text';
+  return null;
+}
+
+function sourceCrawlConfidence(reason: string): FoundMessage['confidence'] {
+  if (reason.startsWith('exact_')) return 'exact';
+  if (/joined_or_checked/.test(reason)) return 'strong';
+  return 'candidate';
+}
+
+async function checkOrJoinInvite(
+  client: TelegramClient,
+  link: string,
+  joinInvites: boolean,
+  joinBudget: { used: number; max: number },
+  cache: Map<string, InviteMeta>
+): Promise<InviteMeta> {
+  const normalized = normalizeTelegramLink(link);
+  const hash = inviteHash(normalized);
+  if (!hash) return { link: normalized, source: 'unknown' };
+  const cacheKey = hash + '|' + joinInvites;
+  const cached = cache.get(cacheKey);
+  if (cached) return cached;
+
+  let meta: InviteMeta = { link: normalized, hash, source: 'unknown' };
+  try {
+    const checked: any = await invokeWithTimeout(
+      client.invoke(new Api.messages.CheckChatInvite({ hash } as any)),
+      15000,
+      'CheckChatInvite'
+    );
+    const chat = checked?.chat;
+    meta = {
+      ...meta,
+      title: String(checked?.title || chatTitle(chat) || '').trim() || undefined,
+      uid: chat?.id ? String(chat.id).replace(/^-/, '') : undefined,
+      username: chatUsername(chat),
+      source: 'checked'
+    };
+  } catch (err) {
+    meta = {
+      ...meta,
+      source: 'error',
+      error: err instanceof Error ? err.message : String(err)
+    };
+  }
+
+  if (joinInvites && joinBudget.used < joinBudget.max && meta.source !== 'joined') {
+    try {
+      joinBudget.used += 1;
+      const imported: any = await invokeWithTimeout(
+        client.invoke(new Api.messages.ImportChatInvite({ hash } as any)),
+        20000,
+        'ImportChatInvite'
+      );
+      const chat = (imported?.chats || [])[0];
+      meta = {
+        ...meta,
+        title: chatTitle(chat) || meta.title,
+        uid: chat?.id ? String(chat.id).replace(/^-/, '') : meta.uid,
+        username: chatUsername(chat) || meta.username,
+        source: 'joined',
+        error: undefined
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (/USER_ALREADY_PARTICIPANT/i.test(message)) {
+        meta = { ...meta, source: 'checked', error: undefined };
+      } else {
+        meta = { ...meta, error: message };
+      }
+    }
+  }
+
+  cache.set(cacheKey, meta);
+  return meta;
+}
+
+async function readKeywordLines(path: string): Promise<string[]> {
+  const raw = await readFile(path, 'utf8');
+  return Array.from(new Set(raw.split(/\r?\n/g).map((line) => line.trim()).filter((line) => line.length >= 2)));
+}
+
+function buildSourceQueries(targets: TargetRecord[], keywords: string[], maxQueries: number): string[] {
+  const queries = new Set<string>();
+  for (const keyword of keywords) queries.add(keyword);
+  for (const target of targets) {
+    if (target.title) {
+      for (const query of importantTitleQueries(target.title).slice(0, 4)) queries.add(query);
+    }
+    for (const uid of targetUids(target)) queries.add(uid);
+  }
+  return Array.from(queries).filter((query) => query.length >= 3).slice(0, maxQueries);
+}
+
+async function runSourceCrawl(
+  client: TelegramClient,
+  targets: TargetRecord[],
+  keywords: string[],
+  args: Record<string, string | boolean>
+): Promise<SourceCrawlMatch[]> {
+  const limit = Number(args.limit || 30);
+  const delayMs = Number(args.delayMs || 800);
+  const strict = args.strict !== 'false';
+  const joinInvites = args.joinInvites === true || args.joinInvites === 'true';
+  const joinBudget = { used: 0, max: Number(args.maxJoinInvites || 20) };
+  const inviteCache = new Map<string, InviteMeta>();
+  const matches: SourceCrawlMatch[] = [];
+  const seen = new Set<string>();
+  const queries = buildSourceQueries(targets, keywords, Number(args.queries || 80));
+
+  for (const query of queries) {
+    await sleep(delayMs);
+    let result: any;
+    try {
+      result = await invokeWithTimeout(
+        client.invoke(new Api.messages.SearchGlobal({
+          q: query,
+          offsetDate: 0 as any,
+          offsetPeer: new Api.InputPeerEmpty(),
+          offsetId: 0 as any,
+          limit,
+          filter: new Api.InputMessagesFilterEmpty()
+        } as any)),
+        30000,
+        'SearchGlobal'
+      );
+    } catch {
+      continue;
+    }
+
+    const chatsById = new Map<string, any>();
+    for (const chat of [...(result?.chats || []), ...(result?.users || [])]) {
+      const key = chatKey(chat);
+      if (key) chatsById.set(key.replace(/^-/, ''), chat);
+    }
+
+    for (const msg of result?.messages || []) {
+      const msgAny = msg as any;
+      const text = String(msgAny?.message || '');
+      const extractedLinks = Array.from(new Set([
+        ...extractLinks(text),
+        ...extractLinksFromEntities(text, msgAny?.entities || []),
+        ...extractLinksFromMarkup(msgAny?.replyMarkup)
+      ].map(normalizeTelegramLink)));
+      const peerId = String(msgAny?.peerId?.channelId || msgAny?.peerId?.chatId || msgAny?.peerId?.userId || '').replace(/^-/, '');
+      const chat = chatsById.get(peerId) || {};
+      const id = Number(msgAny?.id || 0);
+      const sourceKind = sourceType(chat);
+      if (!['channel', 'group'].includes(sourceKind) || !chatUsername(chat)) continue;
+
+      const includePrivateMessageLinks = args.includePrivateMessageLinks === true || args.includePrivateMessageLinks === 'true';
+      const privateCandidates = extractedLinks.filter((link) => {
+        if (isPrivateInviteLink(link)) return true;
+        return includePrivateMessageLinks && /^https:\/\/t\.me\/c\/[0-9]+\/[0-9]+/i.test(link);
+      });
+      if (!privateCandidates.length) continue;
+
+      for (const privateInviteLink of privateCandidates) {
+        const meta = isPrivateInviteLink(privateInviteLink)
+          ? await checkOrJoinInvite(client, privateInviteLink, joinInvites, joinBudget, inviteCache)
+          : { link: privateInviteLink, uid: privateMessageUid(privateInviteLink), source: 'unknown' as const };
+        for (const target of targets) {
+          const reason = sourceCrawlMatchReason(target, privateInviteLink, meta, text);
+          if (!reason) continue;
+          const confidence = sourceCrawlConfidence(reason);
+          if (strict && confidence === 'candidate') continue;
+          const key = [target.uid || target.title || target.links[0] || '', privateInviteLink, peerId, id, reason].join('|');
+          if (seen.has(key)) continue;
+          seen.add(key);
+          matches.push({
+            targetUid: target.uid,
+            targetTitle: target.title,
+            targetLinks: target.links,
+            privateInviteLink,
+            privateInviteMeta: meta,
+            query,
+            matchReason: reason,
+            confidence,
+            sourceType: sourceKind,
+            sourceTitle: chatTitle(chat),
+            sourceUsername: chatUsername(chat),
+            sourceLink: chatUsername(chat) ? 'https://t.me/' + chatUsername(chat) : undefined,
+            messageId: id,
+            messageLink: messageLink(chat, id),
+            text: text.slice(0, 1200),
+            extractedLinks
+          });
+        }
+      }
+    }
+  }
+
+  return matches;
+}
+
 function targetMatches(target: TargetRecord, text: string, links: string[]): string | null {
   const normalizedText = normalizeText(text);
   const normalizedLinks = links.map(normalizeTelegramLink);
@@ -461,6 +746,7 @@ async function main() {
   const limit = Number(args.limit || 30);
   const delayMs = Number(args.delayMs || 800);
   const outPath = typeof args.out === 'string' ? args.out : '';
+  const tsvPath = typeof args.tsv === 'string' ? args.tsv : '';
   const startBots = args.startBots === true || args.startBots === 'true';
   const maxBotProbes = Number(args.maxBotProbes || 20);
   const proxy = parseProxy(process.env.SOCKS_PROXY || '');
@@ -477,6 +763,55 @@ async function main() {
 
   try {
     await client.connect();
+    if (args.mode === 'source-crawl') {
+      const keywordsPath = typeof args.keywordsFile === 'string' ? args.keywordsFile : '';
+      const keywords = keywordsPath ? await readKeywordLines(keywordsPath) : [];
+      const matches = await runSourceCrawl(client, targets, keywords, args);
+      const payload = {
+        generatedAt: new Date().toISOString(),
+        mode: 'source-crawl',
+        targets: targets.length,
+        keywords: keywords.length,
+        results: matches
+      };
+      const json = JSON.stringify(payload, null, 2);
+      if (outPath) {
+        await writeFile(outPath, json, 'utf8');
+      } else {
+        process.stdout.write(json + '\n');
+      }
+      if (tsvPath) {
+        const header = [
+          'confidence',
+          'reason',
+          'target_uid',
+          'target_title',
+          'public_message',
+          'private_invite',
+          'private_title',
+          'private_uid',
+          'query',
+          'source_title',
+          'source_type'
+        ];
+        const rows = matches.map((item) => [
+          item.confidence,
+          item.matchReason,
+          item.targetUid || '',
+          item.targetTitle || '',
+          item.messageLink || '',
+          item.privateInviteLink,
+          item.privateInviteMeta?.title || '',
+          item.privateInviteMeta?.uid || '',
+          item.query,
+          item.sourceTitle,
+          item.sourceType
+        ].map((cell) => String(cell).replace(/[\t\r\n]+/g, ' ')).join('\t'));
+        await writeFile(tsvPath, [header.join('\t'), ...rows].join('\n') + '\n', 'utf8');
+      }
+      return;
+    }
+
     for (const rawTarget of targets) {
       const target = args.hydrate === 'false'
         ? rawTarget
