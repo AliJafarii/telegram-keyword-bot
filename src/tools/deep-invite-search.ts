@@ -7,6 +7,16 @@ interface TargetRecord {
   uid?: string;
   title?: string;
   links: string[];
+  privateMessages?: PrivateMessageRef[];
+  resolvedText?: string;
+  resolvedLinks?: string[];
+  resolvedError?: string;
+}
+
+interface PrivateMessageRef {
+  uid: string;
+  messageId: number;
+  link: string;
 }
 
 interface FoundMessage {
@@ -23,6 +33,7 @@ interface FoundMessage {
   messageLink?: string;
   text: string;
   extractedLinks: string[];
+  confidence: 'exact' | 'strong' | 'candidate' | 'error';
   botProbe?: {
     bot: string;
     command: string;
@@ -137,7 +148,14 @@ function parseTargets(input: string): TargetRecord[] {
     const uid = block.match(/Telegram UID:\s*([0-9]+)/i)?.[1];
     const title = block.match(/Title:\s*(.+?)(?:\n|$)/i)?.[1]?.trim();
     const links = Array.from(new Set(extractLinks(block)));
-    if (uid || title || links.length) targets.push({ uid, title, links });
+    const privateMessages = links
+      .map((link) => {
+        const match = link.match(/^https:\/\/t\.me\/c\/([0-9]+)\/([0-9]+)/i);
+        if (!match) return null;
+        return { uid: match[1], messageId: Number(match[2]), link };
+      })
+      .filter((item): item is PrivateMessageRef => Boolean(item && Number.isFinite(item.messageId)));
+    if (uid || title || links.length) targets.push({ uid, title, links, privateMessages });
   }
 
   return targets;
@@ -182,6 +200,14 @@ function buildQueries(target: TargetRecord): string[] {
   if (target.uid) queries.add(target.uid);
   if (target.title) {
     for (const query of importantTitleQueries(target.title)) queries.add(query);
+  }
+  if (target.resolvedText) {
+    for (const query of importantTitleQueries(target.resolvedText).slice(0, 8)) queries.add(query);
+  }
+  for (const link of target.resolvedLinks || []) {
+    queries.add(link);
+    const bot = parseBotStartLink(link);
+    if (bot) queries.add(bot.username);
   }
   return Array.from(queries).filter((query) => query.trim().length >= 3);
 }
@@ -257,7 +283,28 @@ function targetMatches(target: TargetRecord, text: string, links: string[]): str
       if (hitCount >= Math.min(2, titleTokens.length)) return 'title_terms';
     }
   }
+  if (target.resolvedText) {
+    const resolvedTokens = tokenize(target.resolvedText)
+      .filter((token) => token.length >= 4 && !/^\d+$/.test(token))
+      .slice(0, 10);
+    if (resolvedTokens.length) {
+      const hitCount = resolvedTokens.filter((token) => normalizedText.includes(token)).length;
+      if (hitCount >= Math.min(3, resolvedTokens.length)) return 'resolved_message_terms';
+    }
+  }
+  for (const resolvedLink of target.resolvedLinks || []) {
+    const normalized = normalizeTelegramLink(resolvedLink);
+    if (normalizedText.includes(normalizeText(normalized))) return 'resolved_message_link_text';
+    if (normalizedLinks.includes(normalized)) return 'resolved_message_link_entity';
+  }
   return null;
+}
+
+function confidenceForReason(reason: string): FoundMessage['confidence'] {
+  if (reason.startsWith('search_error') || reason.startsWith('bot_probe_error')) return 'error';
+  if (/exact|uid_reference|private_uid_reference|resolved_message_link/.test(reason)) return 'exact';
+  if (/bot_probe_|resolved_message_terms/.test(reason)) return 'strong';
+  return 'candidate';
 }
 
 async function invokeWithTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
@@ -339,6 +386,64 @@ async function probeBot(
   };
 }
 
+async function hydrateTargetFromPrivateMessage(client: TelegramClient, target: TargetRecord): Promise<TargetRecord> {
+  const refs = target.privateMessages || [];
+  if (!refs.length) return target;
+  const texts: string[] = [];
+  const links: string[] = [];
+  const errors: string[] = [];
+
+  for (const ref of refs.slice(0, 3)) {
+    try {
+      const entity = await invokeWithTimeout(
+        client.getEntity(BigInt('-100' + ref.uid) as any) as Promise<Api.TypeChat>,
+        15000,
+        'private target entity'
+      );
+      const peer = await invokeWithTimeout(
+        client.getInputEntity(entity) as Promise<Api.TypeInputPeer>,
+        15000,
+        'private target input'
+      );
+      const history: any = await invokeWithTimeout(
+        client.invoke(new Api.messages.GetHistory({
+          peer: peer as any,
+          offsetId: ref.messageId + 1,
+          addOffset: 0,
+          limit: 5,
+          maxId: 0,
+          minId: 0,
+          hash: 0 as any
+        } as any)),
+        15000,
+        'private target history'
+      );
+      const msg = (history?.messages || []).find((item: any) => Number(item?.id || 0) === ref.messageId);
+      if (!msg) {
+        errors.push(ref.link + ': message_not_found_or_inaccessible');
+        continue;
+      }
+      const msgAny = msg as any;
+      const text = String(msgAny?.message || '');
+      if (text.trim()) texts.push(text);
+      links.push(
+        ...extractLinks(text),
+        ...extractLinksFromEntities(text, msgAny?.entities || []),
+        ...extractLinksFromMarkup(msgAny?.replyMarkup)
+      );
+    } catch (err) {
+      errors.push(ref.link + ': ' + (err instanceof Error ? err.message : String(err)));
+    }
+  }
+
+  return {
+    ...target,
+    resolvedText: texts.join('\n\n').slice(0, 3000) || target.resolvedText,
+    resolvedLinks: Array.from(new Set([...(target.resolvedLinks || []), ...links.map(normalizeTelegramLink)])),
+    resolvedError: errors.length ? errors.join(' | ') : undefined
+  };
+}
+
 async function main() {
   const args = parseArgs();
   loadEnv({ path: String(args.env || process.env.ENV_FILE || '.env.production') });
@@ -366,12 +471,17 @@ async function main() {
   });
 
   const found: FoundMessage[] = [];
+  const hydratedTargets: TargetRecord[] = [];
   const seen = new Set<string>();
   const probedBots = new Set<string>();
 
   try {
     await client.connect();
-    for (const target of targets) {
+    for (const rawTarget of targets) {
+      const target = args.hydrate === 'false'
+        ? rawTarget
+        : await hydrateTargetFromPrivateMessage(client, rawTarget);
+      hydratedTargets.push(target);
       const queries = buildQueries(target).slice(0, Number(args.queries || 12));
       for (const query of queries) {
         await sleep(delayMs);
@@ -400,7 +510,8 @@ async function main() {
             sourceTitle: '',
             messageId: 0,
             text: '',
-            extractedLinks: []
+            extractedLinks: [],
+            confidence: 'error'
           });
           continue;
         }
@@ -421,6 +532,8 @@ async function main() {
           ]));
           const reason = targetMatches(target, text, extractedLinks);
           if (!reason) continue;
+          const confidence = confidenceForReason(reason);
+          if (args.strict === 'true' && confidence === 'candidate') continue;
 
           const peerId = String(msgAny?.peerId?.channelId || msgAny?.peerId?.chatId || msgAny?.peerId?.userId || '').replace(/^-/, '');
           const chat = chatsById.get(peerId) || {};
@@ -442,7 +555,8 @@ async function main() {
             messageId: id,
             messageLink: messageLink(chat, id),
             text: text.slice(0, 1000),
-            extractedLinks
+            extractedLinks,
+            confidence
           });
 
           if (startBots && probedBots.size < maxBotProbes) {
@@ -468,6 +582,7 @@ async function main() {
                     messageId: 0,
                     text: botProbe.responseText,
                     extractedLinks: botProbe.responseLinks,
+                    confidence: confidenceForReason(botProbe.responseReason ? 'bot_probe_' + botProbe.responseReason : 'bot_probe_response'),
                     botProbe
                   });
                 }
@@ -484,7 +599,8 @@ async function main() {
                   sourceLink: 'https://t.me/' + botStart.username,
                   messageId: 0,
                   text: '',
-                  extractedLinks: []
+                  extractedLinks: [],
+                  confidence: 'error'
                 });
               }
             }
@@ -499,6 +615,7 @@ async function main() {
   const payload = {
     generatedAt: new Date().toISOString(),
     targets: targets.length,
+    hydratedTargets,
     results: found
   };
   const json = JSON.stringify(payload, null, 2);
