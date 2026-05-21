@@ -49,6 +49,7 @@ interface InviteMeta {
   title?: string;
   uid?: string;
   username?: string;
+  isPrivate?: boolean;
   source: 'checked' | 'joined' | 'error' | 'unknown';
   error?: string;
 }
@@ -340,18 +341,19 @@ function sourceMessageMatchesTitle(text: string, target: TargetRecord): boolean 
 function sourceCrawlMatchReason(target: TargetRecord, inviteLink: string, meta: InviteMeta | undefined, text: string): string | null {
   const normalizedInvite = normalizeTelegramLink(inviteLink);
   const normalizedTargets = target.links.map(normalizeTelegramLink);
-  if (normalizedTargets.includes(normalizedInvite)) return 'exact_private_invite_link';
+  if (normalizedTargets.includes(normalizedInvite) && (meta?.isPrivate !== false)) return 'exact_private_invite_link';
 
   const candidateUid = privateMessageUid(normalizedInvite) || meta?.uid;
   const uids = targetUids(target);
   if (candidateUid && uids.includes(candidateUid)) return 'exact_private_uid';
 
+  if (meta?.isPrivate === false) return null;
   const targetTitleSignals = titleSignalTokenCount(target.title);
   if (targetTitleSignals && target.title && meta?.title && titleOverlapScore(meta.title, target.title) >= Math.min(2, targetTitleSignals)) {
     return 'joined_or_checked_title_overlap';
   }
-  if (sourceMessageMatchesTitle(text, target)) return 'source_message_title_terms';
-  if (target.uid && normalizeText(text).includes(target.uid)) return 'source_message_uid_text';
+  if (!meta && sourceMessageMatchesTitle(text, target)) return 'source_message_title_terms';
+  if (!meta && target.uid && normalizeText(text).includes(target.uid)) return 'source_message_uid_text';
   return null;
 }
 
@@ -383,11 +385,13 @@ async function checkOrJoinInvite(
       'CheckChatInvite'
     );
     const chat = checked?.chat;
+    const username = chatUsername(chat);
     meta = {
       ...meta,
       title: String(checked?.title || chatTitle(chat) || '').trim() || undefined,
       uid: chat?.id ? String(chat.id).replace(/^-/, '') : undefined,
-      username: chatUsername(chat),
+      username,
+      isPrivate: !username,
       source: 'checked'
     };
   } catch (err) {
@@ -407,11 +411,13 @@ async function checkOrJoinInvite(
         'ImportChatInvite'
       );
       const chat = (imported?.chats || [])[0];
+      const username = chatUsername(chat) || meta.username;
       meta = {
         ...meta,
         title: chatTitle(chat) || meta.title,
         uid: chat?.id ? String(chat.id).replace(/^-/, '') : meta.uid,
-        username: chatUsername(chat) || meta.username,
+        username,
+        isPrivate: !username,
         source: 'joined',
         error: undefined
       };
