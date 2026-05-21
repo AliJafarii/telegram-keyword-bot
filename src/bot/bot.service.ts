@@ -521,7 +521,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     const usernameMatch = normalized.match(/^https:\/\/t\.me\/([A-Za-z0-9_]+)(?:[/?#].*)?$/i);
     if (!usernameMatch?.[1]) return null;
     if (!/bot$/i.test(usernameMatch[1])) return null;
-    return `https://t.me/${usernameMatch[1]}`;
+    return normalized;
   }
 
   private parsePlainRootLink(link: string): string | null {

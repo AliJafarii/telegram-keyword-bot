@@ -59,6 +59,7 @@ type ParsedTargetKind = 'invite' | 'bot' | 'public_chat' | 'public_message' | 'p
 interface ParsedTargetLink {
   kind: ParsedTargetKind;
   canonical: string;
+  botLink?: string;
   username?: string;
   botStartParam?: string;
   privateChannelId?: string;
@@ -363,6 +364,7 @@ export class SearchService {
       return {
         kind: 'bot',
         canonical,
+        botLink: normalized,
         username,
         botStartParam: this.extractBotStartParam(normalized)
       };
@@ -1589,6 +1591,7 @@ export class SearchService {
   private toClientLinkFromParsedTarget(parsed: ParsedTargetLink): string | null {
     switch (parsed.kind) {
       case 'bot':
+        return parsed.botLink || parsed.canonical;
       case 'invite':
       case 'public_chat':
       case 'private_chat':
@@ -2493,7 +2496,8 @@ export class SearchService {
         if (!parsed) continue;
 
         if (parsed.kind === 'bot') {
-          clientLinks.add(parsed.canonical);
+          const botClientLink = this.toClientLinkFromParsedTarget(parsed);
+          if (botClientLink) clientLinks.add(botClientLink);
           if (startBots && parsed.username) {
             const botKey = parsed.username.toLowerCase();
             if (!startedBots.has(botKey)) {
@@ -2515,7 +2519,8 @@ export class SearchService {
               const parsedBio = this.parseTargetLink(botBioLink);
               if (!parsedBio) continue;
               if (parsedBio.kind === 'bot') {
-                clientLinks.add(parsedBio.canonical);
+                const botClientLink = this.toClientLinkFromParsedTarget(parsedBio);
+                if (botClientLink) clientLinks.add(botClientLink);
                 continue;
               }
               const resolvedBio = await resolveCachedTarget(parsedBio);
