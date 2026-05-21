@@ -400,10 +400,10 @@ export class SearchService {
     return parts.join(' ').trim();
   }
 
-  private chatIdentityContainsKeyword(chat: Api.TypeChat, keywordTerms: string[]): boolean {
+  private chatIdentityContainsKeyword(chat: Api.TypeChat, keywordTermSets: string[][]): boolean {
     const text = this.getChatIdentityText(chat);
     if (!text) return false;
-    return this.messageContainsKeyword(text, keywordTerms);
+    return this.messageContainsAnyKeyword(text, keywordTermSets);
   }
 
   private classifyChatType(chat: Api.TypeChat): StoredChannelType {
@@ -588,6 +588,168 @@ export class SearchService {
     return compact ? [compact] : [];
   }
 
+  private addKeywordQuery(out: string[], seen: Set<string>, query: string): void {
+    const normalized = query.replace(/\s+/g, ' ').trim();
+    if (normalized.length < 2) return;
+    const key = this.normalizeForSearch(normalized);
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(normalized);
+  }
+
+  private buildObservedKeywordAliases(compactKeyword: string): string[] {
+    if (compactKeyword === 'کنکل' || compactKeyword === 'کنسل') {
+      return ['cankel', 'cancel', 'kankel', 'konkol'];
+    }
+    return [];
+  }
+
+  private transliteratePersianToken(token: string): string {
+    const map: Record<string, string> = {
+      ا: 'a',
+      ب: 'b',
+      پ: 'p',
+      ت: 't',
+      ث: 's',
+      ج: 'j',
+      چ: 'ch',
+      ح: 'h',
+      خ: 'kh',
+      د: 'd',
+      ذ: 'z',
+      ر: 'r',
+      ز: 'z',
+      ژ: 'zh',
+      س: 's',
+      ش: 'sh',
+      ص: 's',
+      ض: 'z',
+      ط: 't',
+      ظ: 'z',
+      ع: 'a',
+      غ: 'gh',
+      ف: 'f',
+      ق: 'gh',
+      ک: 'k',
+      گ: 'g',
+      ل: 'l',
+      م: 'm',
+      ن: 'n',
+      و: 'v',
+      ه: 'h',
+      ی: 'y'
+    };
+    return Array.from(this.normalizeForSearch(token))
+      .map((ch) => map[ch] || (/^[a-z0-9]$/i.test(ch) ? ch.toLowerCase() : ''))
+      .join('');
+  }
+
+  private buildLatinKeywordAliases(keyword: string): string[] {
+    const aliases = new Set<string>();
+    const compactKeyword = this.compactForSearch(keyword);
+    for (const alias of this.buildObservedKeywordAliases(compactKeyword)) aliases.add(alias);
+    const coreKeyword = this.stripMediaIntentTerms(keyword);
+    const compactCore = this.compactForSearch(coreKeyword);
+    for (const alias of this.buildObservedKeywordAliases(compactCore)) aliases.add(alias);
+
+    for (const token of this.tokenizeForSearch(coreKeyword || keyword)) {
+      for (const alias of this.buildObservedKeywordAliases(this.compactForSearch(token))) aliases.add(alias);
+      if (!/[\u0600-\u06FF]/.test(token)) continue;
+      const latin = this.transliteratePersianToken(token);
+      if (latin.length >= 3) {
+        aliases.add(latin);
+        if (latin.includes('k')) aliases.add(latin.replace(/k/g, 'c'));
+      }
+    }
+
+    return Array.from(aliases);
+  }
+
+  private stripMediaIntentTerms(keyword: string): string {
+    const stopWords = new Set([
+      'دانلود',
+      'رایگان',
+      'سریال',
+      'فیلم',
+      'فصل',
+      'قسمت',
+      'لینک',
+      'اپیزود',
+      'free',
+      'download',
+      'serial',
+      'series',
+      'episode',
+      'season',
+      'part',
+      'fasl',
+      'ghesmat',
+      'movie',
+      'tv',
+      'show'
+    ]);
+    return this.tokenizeForSearch(keyword)
+      .filter((token) => !stopWords.has(token) && !/^\d+$/.test(token))
+      .join(' ')
+      .trim();
+  }
+
+  private buildKeywordTermSets(keyword: string): string[][] {
+    const sets: string[][] = [];
+    const seen = new Set<string>();
+    const add = (query: string) => {
+      const terms = this.splitKeywordTerms(query);
+      if (!terms.length) return;
+      const key = terms.join('\u0000');
+      if (seen.has(key)) return;
+      seen.add(key);
+      sets.push(terms);
+    };
+
+    add(keyword);
+    const coreKeyword = this.stripMediaIntentTerms(keyword);
+    if (coreKeyword && coreKeyword !== this.normalizeForSearch(keyword).replace(/\s+/g, ' ')) add(coreKeyword);
+    const compact = this.compactForSearch(keyword);
+    if (compact && compact !== this.normalizeForSearch(keyword).replace(/\s+/g, '')) add(compact);
+    for (const alias of this.buildLatinKeywordAliases(keyword)) add(alias);
+    return sets;
+  }
+
+  private buildKeywordSearchQueries(keyword: string): string[] {
+    const expansionEnabled = this.config.get<boolean>('crawlKeywordQueryExpansion') !== false;
+    const maxQueries = Math.max(1, Number(this.config.get<number>('crawlKeywordMaxSeedQueries') || 18));
+    if (!expansionEnabled) return [keyword.trim()].filter(Boolean);
+
+    const out: string[] = [];
+    const seen = new Set<string>();
+    const compact = this.compactForSearch(keyword);
+    const coreKeyword = this.stripMediaIntentTerms(keyword);
+    const baseQueries = [
+      keyword,
+      coreKeyword && coreKeyword !== this.normalizeForSearch(keyword).replace(/\s+/g, ' ') ? coreKeyword : '',
+      compact && compact !== this.normalizeForSearch(keyword).replace(/\s+/g, '') ? compact : ''
+    ].filter(Boolean);
+    const latinAliases = this.buildLatinKeywordAliases(keyword);
+
+    for (const query of baseQueries) this.addKeywordQuery(out, seen, query);
+    for (const alias of latinAliases) this.addKeywordQuery(out, seen, alias);
+    for (const alias of latinAliases) {
+      this.addKeywordQuery(out, seen, `free ${alias}`);
+      this.addKeywordQuery(out, seen, `${alias} series`);
+      this.addKeywordQuery(out, seen, `serial ${alias}`);
+      this.addKeywordQuery(out, seen, `${alias} episode`);
+    }
+    for (const query of baseQueries) {
+      this.addKeywordQuery(out, seen, `دانلود ${query}`);
+      this.addKeywordQuery(out, seen, `دانلود رایگان ${query}`);
+      this.addKeywordQuery(out, seen, `سریال ${query}`);
+      this.addKeywordQuery(out, seen, `${query} قسمت`);
+      this.addKeywordQuery(out, seen, `${query} فصل`);
+    }
+
+    return out.slice(0, maxQueries);
+  }
+
   private messageContainsKeyword(text: string, keywordTerms: string[]): boolean {
     if (!keywordTerms.length) return false;
     if (this.containsEmojiObfuscatedKeyword(text, keywordTerms)) return true;
@@ -621,6 +783,10 @@ export class SearchService {
       return this.fuzzyIncludes(normalizedTokens, part, maxDistance)
         || this.fuzzyWindowIncludes(normalizedTokens, part, maxDistance);
     });
+  }
+
+  private messageContainsAnyKeyword(text: string, keywordTermSets: string[][]): boolean {
+    return keywordTermSets.some((terms) => this.messageContainsKeyword(text, terms));
   }
 
   private extractUsernameFromLink(link: string): string | null {
@@ -914,7 +1080,7 @@ export class SearchService {
   private async targetMessageContainsKeyword(
     chat: Api.TypeChat,
     messageId: number,
-    keywordTerms: string[],
+    keywordTermSets: string[][],
     abortSignal?: AbortSignal
   ): Promise<boolean> {
     if (!Number.isFinite(messageId) || messageId <= 0) return false;
@@ -942,7 +1108,7 @@ export class SearchService {
       const exact = page.find((m) => Number((m as any)?.id || 0) === messageId);
       if (!exact) return false;
       const text = String((exact as any)?.message || '');
-      return this.messageContainsKeyword(text, keywordTerms);
+      return this.messageContainsAnyKeyword(text, keywordTermSets);
     } catch {
       this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
       return false;
@@ -1041,7 +1207,7 @@ export class SearchService {
   private async resolveParsedLinkForFrontier(params: {
     parsed: ParsedTargetLink;
     autoJoinInvites: boolean;
-    keywordTerms: string[];
+    keywordTermSets: string[][];
     searchId: number;
     joinedPrivateChats: Map<string, Api.TypeChat>;
     abortSignal?: AbortSignal;
@@ -1049,7 +1215,7 @@ export class SearchService {
     const {
       parsed,
       autoJoinInvites,
-      keywordTerms,
+      keywordTermSets,
       searchId,
       joinedPrivateChats,
       abortSignal
@@ -1072,11 +1238,11 @@ export class SearchService {
       const targetHasKeyword = await this.targetMessageContainsKeyword(
         resolved,
         parsed.messageId,
-        keywordTerms,
+        keywordTermSets,
         abortSignal
       );
       if (!targetHasKeyword) {
-        if (this.chatIdentityContainsKeyword(resolved, keywordTerms)) {
+        if (this.chatIdentityContainsKeyword(resolved, keywordTermSets)) {
           await this.logStep(searchId, 'iterative_link_target_keyword_fallback_identity', {
             link: parsed.canonical,
             messageId: parsed.messageId
@@ -1802,8 +1968,8 @@ export class SearchService {
     this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
     const searchRef = searchRefArg || (searchId > 0 ? String(searchId) : `tmp_${Date.now()}`);
 
-    const keywordTerms = this.splitKeywordTerms(keyword);
-    if (!keywordTerms.length) {
+    const keywordTermSets = this.buildKeywordTermSets(keyword);
+    if (!keywordTermSets.length) {
       return {
         seedPublics: [],
         links: [],
@@ -1847,6 +2013,7 @@ export class SearchService {
     const allowVideoCaptionWithoutLink = this.config.get<boolean>('crawlAllowVideoCaptionWithoutLink') !== false;
     const metadataExpansion = this.config.get<boolean>('crawlMetadataExpansion') !== false;
     const maxMetadataQueries = Math.max(0, Number(this.config.get<number>('crawlMetadataMaxQueries') || 25));
+    const seedQueries = this.buildKeywordSearchQueries(keyword);
     const botBioLinksCache = new Map<string, Promise<string[]>>();
     const resolvedTargetCache = new Map<string, Promise<Api.TypeChat | null>>();
     const getCachedBotBioLinks = (username: string): Promise<string[]> => {
@@ -1864,7 +2031,7 @@ export class SearchService {
       const promise = this.resolveParsedLinkForFrontier({
         parsed,
         autoJoinInvites,
-        keywordTerms,
+        keywordTermSets,
         searchId,
         joinedPrivateChats,
         abortSignal
@@ -1883,62 +2050,64 @@ export class SearchService {
     );
 
     const seedChats = new Map<string, Api.TypeChat>();
-    await this.logStep(searchId, 'iterative_seed_start', { keyword, maxIterations });
+    await this.logStep(searchId, 'iterative_seed_start', { keyword, maxIterations, seedQueries });
 
-    try {
-      const byName = await this.invokeWithTimeout(
-        this.client.invoke(
-          new Api.contacts.Search({ q: keyword, limit: seedLimit })
-        ),
-        20000,
-        'iterative_seed_contacts_search',
-        abortSignal
-      );
-      for (const chat of byName.chats || []) {
-        const key = this.getChatKey(chat);
-        if (key) seedChats.set(key, chat);
+    for (const seedQuery of seedQueries) {
+      try {
+        const byName = await this.invokeWithTimeout(
+          this.client.invoke(
+            new Api.contacts.Search({ q: seedQuery, limit: seedLimit })
+          ),
+          20000,
+          'iterative_seed_contacts_search',
+          abortSignal
+        );
+        for (const chat of byName.chats || []) {
+          const key = this.getChatKey(chat);
+          if (key) seedChats.set(key, chat);
+        }
+        for (const user of (byName as any).users || []) {
+          const key = this.getChatKey(user as Api.TypeChat);
+          if (key) seedChats.set(key, user as Api.TypeChat);
+        }
+        await this.logStep(searchId, 'iterative_seed_contacts', { query: seedQuery, count: seedChats.size });
+      } catch (err) {
+        this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
+        const message = err instanceof Error ? err.message : String(err);
+        await this.logStep(searchId, 'iterative_seed_contacts_error', { query: seedQuery, error: message });
       }
-      for (const user of (byName as any).users || []) {
-        const key = this.getChatKey(user as Api.TypeChat);
-        if (key) seedChats.set(key, user as Api.TypeChat);
-      }
-      await this.logStep(searchId, 'iterative_seed_contacts', { count: seedChats.size });
-    } catch (err) {
-      this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
-      const message = err instanceof Error ? err.message : String(err);
-      await this.logStep(searchId, 'iterative_seed_contacts_error', { error: message });
-    }
 
-    try {
-      const global = await this.invokeWithTimeout(
-        this.client.invoke(
-          new Api.messages.SearchGlobal({
-            q: keyword,
-            offsetDate: 0 as any,
-            offsetPeer: new Api.InputPeerEmpty(),
-            offsetId: 0 as any,
-            limit: seedLimit,
-            filter: new Api.InputMessagesFilterEmpty()
-          } as any)
-        ),
-        20000,
-        'iterative_seed_global_search',
-        abortSignal
-      );
-      const globalAny = global as any;
-      for (const chat of globalAny.chats || []) {
-        const key = this.getChatKey(chat);
-        if (key) seedChats.set(key, chat);
+      try {
+        const global = await this.invokeWithTimeout(
+          this.client.invoke(
+            new Api.messages.SearchGlobal({
+              q: seedQuery,
+              offsetDate: 0 as any,
+              offsetPeer: new Api.InputPeerEmpty(),
+              offsetId: 0 as any,
+              limit: seedLimit,
+              filter: new Api.InputMessagesFilterEmpty()
+            } as any)
+          ),
+          20000,
+          'iterative_seed_global_search',
+          abortSignal
+        );
+        const globalAny = global as any;
+        for (const chat of globalAny.chats || []) {
+          const key = this.getChatKey(chat);
+          if (key) seedChats.set(key, chat);
+        }
+        for (const user of globalAny.users || []) {
+          const key = this.getChatKey(user as Api.TypeChat);
+          if (key) seedChats.set(key, user as Api.TypeChat);
+        }
+        await this.logStep(searchId, 'iterative_seed_global', { query: seedQuery, count: seedChats.size });
+      } catch (err) {
+        this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
+        const message = err instanceof Error ? err.message : String(err);
+        await this.logStep(searchId, 'iterative_seed_global_error', { query: seedQuery, error: message });
       }
-      for (const user of globalAny.users || []) {
-        const key = this.getChatKey(user as Api.TypeChat);
-        if (key) seedChats.set(key, user as Api.TypeChat);
-      }
-      await this.logStep(searchId, 'iterative_seed_global', { count: seedChats.size });
-    } catch (err) {
-      this.throwIfAborted(abortSignal, 'crawlKeywordIterative');
-      const message = err instanceof Error ? err.message : String(err);
-      await this.logStep(searchId, 'iterative_seed_global_error', { error: message });
     }
 
     const seedPublics: string[] = [];
@@ -2177,8 +2346,8 @@ export class SearchService {
             const text = String(msgAny.message || '');
             const mediaMetadata = this.extractMediaMetadata(msgAny);
             const metadataText = this.mediaMetadataToText(mediaMetadata);
-            const textKeywordMatch = this.messageContainsKeyword(text, keywordTerms);
-            const metadataKeywordMatch = metadataExpansion && this.messageContainsKeyword(metadataText, keywordTerms);
+            const textKeywordMatch = this.messageContainsAnyKeyword(text, keywordTermSets);
+            const metadataKeywordMatch = metadataExpansion && this.messageContainsAnyKeyword(metadataText, keywordTermSets);
             const messageKeywordMatch = textKeywordMatch || metadataKeywordMatch;
             if (!messageKeywordMatch) continue;
 
@@ -2213,7 +2382,7 @@ export class SearchService {
             if (metadataExpansion && mediaMetadata && metadataQueries.size < maxMetadataQueries) {
               for (const query of this.buildMetadataQueries(mediaMetadata)) {
                 if (metadataQueries.size >= maxMetadataQueries) break;
-                if (!this.messageContainsKeyword(query, keywordTerms)) metadataQueries.add(query);
+                if (!this.messageContainsAnyKeyword(query, keywordTermSets)) metadataQueries.add(query);
               }
             }
 

@@ -54,6 +54,8 @@ export default () => ({
   crawlMaxLinksPerIteration: Number(process.env.CRAWL_MAX_LINKS_PER_ITERATION || 80),
   crawlMetadataExpansion: process.env.CRAWL_METADATA_EXPANSION !== 'false',
   crawlMetadataMaxQueries: Number(process.env.CRAWL_METADATA_MAX_QUERIES || 25),
+  crawlKeywordQueryExpansion: process.env.CRAWL_KEYWORD_QUERY_EXPANSION !== 'false',
+  crawlKeywordMaxSeedQueries: Number(process.env.CRAWL_KEYWORD_MAX_SEED_QUERIES || 18),
   crawlAutoJoin: process.env.CRAWL_AUTO_JOIN !== 'false',
   crawlJoinPublic: process.env.CRAWL_JOIN_PUBLIC !== 'false',
   crawlStartBots: process.env.CRAWL_START_BOTS !== 'false',
