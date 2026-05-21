@@ -16,7 +16,8 @@
     "db:copy-sqlite-to-postgres": "node scripts/copy-sqlite-to-postgres.js",
     "db:cleanup": "ENV_FILE=.env.production ts-node -r tsconfig-paths/register src/database/cleanup-schema.ts",
     "db:reset": "ENV_FILE=.env.production ts-node -r tsconfig-paths/register src/database/reset-schema.ts",
-    "session:generate": "ENV_FILE=.env.production ts-node -r tsconfig-paths/register src/tools/generate-session.ts"
+    "session:generate": "ENV_FILE=.env.production ts-node -r tsconfig-paths/register src/tools/generate-session.ts",
+    "deep:invite-search": "ENV_FILE=.env.production ts-node -r tsconfig-paths/register src/tools/deep-invite-search.ts"
   },
   "dependencies": {
     "@nestjs/common": "^11.1.21",
