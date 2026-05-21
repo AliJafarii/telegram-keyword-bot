@@ -446,6 +446,149 @@ function buildSourceQueries(targets: TargetRecord[], keywords: string[], maxQuer
   return Array.from(queries).filter((query) => query.length >= 3).slice(0, maxQueries);
 }
 
+async function readSourceLines(path: string): Promise<string[]> {
+  const raw = await readFile(path, 'utf8');
+  const sources = new Set<string>();
+  for (const line of raw.split(/\r?\n/g)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const link = extractLinks(trimmed)[0];
+    if (link) {
+      const username = normalizeTelegramLink(link).match(/^https:\/\/t\.me\/([A-Za-z0-9_]+)(?:[/?#].*)?$/i)?.[1];
+      if (username && !/bot$/i.test(username)) sources.add(username);
+      continue;
+    }
+    if (/^[A-Za-z0-9_]{5,}$/.test(trimmed) && !/bot$/i.test(trimmed)) sources.add(trimmed);
+  }
+  return Array.from(sources);
+}
+
+async function inspectSourceMessage(
+  client: TelegramClient,
+  targets: TargetRecord[],
+  args: Record<string, string | boolean>,
+  inviteCache: Map<string, InviteMeta>,
+  joinBudget: { used: number; max: number },
+  matches: SourceCrawlMatch[],
+  seen: Set<string>,
+  query: string,
+  chat: any,
+  msg: any
+): Promise<void> {
+  const msgAny = msg as any;
+  const text = String(msgAny?.message || '');
+  const extractedLinks = Array.from(new Set([
+    ...extractLinks(text),
+    ...extractLinksFromEntities(text, msgAny?.entities || []),
+    ...extractLinksFromMarkup(msgAny?.replyMarkup)
+  ].map(normalizeTelegramLink)));
+  const includePrivateMessageLinks = args.includePrivateMessageLinks === true || args.includePrivateMessageLinks === 'true';
+  const privateCandidates = extractedLinks.filter((link) => {
+    if (isPrivateInviteLink(link)) return true;
+    return includePrivateMessageLinks && /^https:\/\/t\.me\/c\/[0-9]+\/[0-9]+/i.test(link);
+  });
+  if (!privateCandidates.length) return;
+
+  const joinInvites = args.joinInvites === true || args.joinInvites === 'true';
+  const strict = args.strict !== 'false';
+  const id = Number(msgAny?.id || 0);
+  const sourceKind = sourceType(chat);
+
+  for (const privateInviteLink of privateCandidates) {
+    const meta = isPrivateInviteLink(privateInviteLink)
+      ? await checkOrJoinInvite(client, privateInviteLink, joinInvites, joinBudget, inviteCache)
+      : { link: privateInviteLink, uid: privateMessageUid(privateInviteLink), source: 'unknown' as const };
+    for (const target of targets) {
+      const reason = sourceCrawlMatchReason(target, privateInviteLink, meta, text);
+      if (!reason) continue;
+      const confidence = sourceCrawlConfidence(reason);
+      if (strict && confidence === 'candidate') continue;
+      const key = [target.uid || target.title || target.links[0] || '', privateInviteLink, chatUsername(chat) || chatKey(chat), id, reason].join('|');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      matches.push({
+        targetUid: target.uid,
+        targetTitle: target.title,
+        targetLinks: target.links,
+        privateInviteLink,
+        privateInviteMeta: meta,
+        query,
+        matchReason: reason,
+        confidence,
+        sourceType: sourceKind,
+        sourceTitle: chatTitle(chat),
+        sourceUsername: chatUsername(chat),
+        sourceLink: chatUsername(chat) ? 'https://t.me/' + chatUsername(chat) : undefined,
+        messageId: id,
+        messageLink: messageLink(chat, id),
+        text: text.slice(0, 1200),
+        extractedLinks
+      });
+    }
+  }
+}
+
+async function runSourceHistory(
+  client: TelegramClient,
+  targets: TargetRecord[],
+  sources: string[],
+  args: Record<string, string | boolean>
+): Promise<SourceCrawlMatch[]> {
+  const perSource = Number(args.perSource || 200);
+  const pageSize = Math.min(100, Number(args.pageSize || 100));
+  const delayMs = Number(args.delayMs || 500);
+  const joinBudget = { used: 0, max: Number(args.maxJoinInvites || 50) };
+  const inviteCache = new Map<string, InviteMeta>();
+  const matches: SourceCrawlMatch[] = [];
+  const seen = new Set<string>();
+
+  for (const username of sources.slice(0, Number(args.maxSources || sources.length))) {
+    await sleep(delayMs);
+    let peer: any;
+    let chat: any;
+    try {
+      chat = await invokeWithTimeout(client.getEntity('@' + username) as Promise<Api.TypeChat>, 15000, 'source entity');
+      peer = await invokeWithTimeout(client.getInputEntity(chat) as Promise<Api.TypeInputPeer>, 15000, 'source input');
+    } catch {
+      continue;
+    }
+    let offsetId = 0;
+    let read = 0;
+    while (read < perSource) {
+      const limit = Math.min(pageSize, perSource - read);
+      let history: any;
+      try {
+        history = await invokeWithTimeout(
+          client.invoke(new Api.messages.GetHistory({
+            peer: peer as any,
+            offsetId,
+            addOffset: 0,
+            limit,
+            maxId: 0,
+            minId: 0,
+            hash: 0 as any
+          } as any)),
+          20000,
+          'source history'
+        );
+      } catch {
+        break;
+      }
+      const messages = history?.messages || [];
+      if (!messages.length) break;
+      for (const msg of messages) {
+        await inspectSourceMessage(client, targets, args, inviteCache, joinBudget, matches, seen, username, chat, msg);
+      }
+      read += messages.length;
+      offsetId = Number(messages[messages.length - 1]?.id || 0);
+      if (!offsetId || messages.length < limit) break;
+      await sleep(delayMs);
+    }
+  }
+
+  return matches;
+}
+
 async function runSourceCrawl(
   client: TelegramClient,
   targets: TargetRecord[],
@@ -804,6 +947,54 @@ async function main() {
           item.privateInviteMeta?.title || '',
           item.privateInviteMeta?.uid || '',
           item.query,
+          item.sourceTitle,
+          item.sourceType
+        ].map((cell) => String(cell).replace(/[\t\r\n]+/g, ' ')).join('\t'));
+        await writeFile(tsvPath, [header.join('\t'), ...rows].join('\n') + '\n', 'utf8');
+      }
+      return;
+    }
+
+    if (args.mode === 'source-history') {
+      const sourcesPath = typeof args.sourcesFile === 'string' ? args.sourcesFile : '';
+      if (!sourcesPath) throw new Error('source-history needs --sourcesFile sources.txt');
+      const sources = await readSourceLines(sourcesPath);
+      const matches = await runSourceHistory(client, targets, sources, args);
+      const payload = {
+        generatedAt: new Date().toISOString(),
+        mode: 'source-history',
+        targets: targets.length,
+        sources: sources.length,
+        results: matches
+      };
+      const json = JSON.stringify(payload, null, 2);
+      if (outPath) {
+        await writeFile(outPath, json, 'utf8');
+      } else {
+        process.stdout.write(json + '\n');
+      }
+      if (tsvPath) {
+        const header = [
+          'confidence',
+          'reason',
+          'target_uid',
+          'target_title',
+          'public_message',
+          'private_invite',
+          'private_title',
+          'private_uid',
+          'source_title',
+          'source_type'
+        ];
+        const rows = matches.map((item) => [
+          item.confidence,
+          item.matchReason,
+          item.targetUid || '',
+          item.targetTitle || '',
+          item.messageLink || '',
+          item.privateInviteLink,
+          item.privateInviteMeta?.title || '',
+          item.privateInviteMeta?.uid || '',
           item.sourceTitle,
           item.sourceType
         ].map((cell) => String(cell).replace(/[\t\r\n]+/g, ' ')).join('\t'));
