@@ -599,13 +599,6 @@ export class SearchService {
     out.push(normalized);
   }
 
-  private buildObservedKeywordAliases(compactKeyword: string): string[] {
-    if (compactKeyword === 'کنکل' || compactKeyword === 'کنسل') {
-      return ['cankel', 'cancel', 'kankel', 'konkol'];
-    }
-    return [];
-  }
-
   private transliteratePersianToken(token: string): string {
     const map: Record<string, string> = {
       ا: 'a',
@@ -646,21 +639,69 @@ export class SearchService {
       .join('');
   }
 
+  private buildVowelizedLatinAliases(latin: string): string[] {
+    const skeleton = latin.replace(/[^a-z0-9]/gi, '').toLowerCase();
+    if (skeleton.length < 3 || /[aeiou]/i.test(skeleton)) return [];
+
+    const out = new Set<string>();
+    const firstVariants = skeleton.charAt(0) === 'k'
+      ? ['k', 'c']
+      : skeleton.charAt(0) === 'c'
+        ? ['c', 'k']
+        : [skeleton.charAt(0)];
+    const vowelPatterns = [
+      ['a'],
+      ['e'],
+      ['o'],
+      ['a', 'e'],
+      ['a', 'a'],
+      ['o', 'o'],
+      ['a', 'i'],
+      ['e', 'i']
+    ];
+
+    if (skeleton.length === 4) {
+      for (const first of firstVariants) {
+        const chars = [first, ...skeleton.slice(1)];
+        for (const firstVowel of ['a', 'e', 'o']) {
+          for (const secondVowel of ['a', 'e', 'o']) {
+            out.add(`${chars[0]}${firstVowel}${chars[1]}${chars[2]}${secondVowel}${chars[3]}`);
+          }
+        }
+      }
+    }
+
+    for (const first of firstVariants) {
+      const chars = [first, ...skeleton.slice(1)];
+      for (const pattern of vowelPatterns) {
+        let candidate = '';
+        for (let i = 0; i < chars.length; i += 1) {
+          candidate += chars[i];
+          if (i < chars.length - 1) {
+            candidate += pattern[Math.min(i, pattern.length - 1)];
+          }
+        }
+        if (candidate.length <= 12) out.add(candidate);
+      }
+    }
+
+    return Array.from(out);
+  }
+
   private buildLatinKeywordAliases(keyword: string): string[] {
     const aliases = new Set<string>();
-    const compactKeyword = this.compactForSearch(keyword);
-    for (const alias of this.buildObservedKeywordAliases(compactKeyword)) aliases.add(alias);
     const coreKeyword = this.stripMediaIntentTerms(keyword);
-    const compactCore = this.compactForSearch(coreKeyword);
-    for (const alias of this.buildObservedKeywordAliases(compactCore)) aliases.add(alias);
+    const tokens = this.tokenizeForSearch(coreKeyword || keyword);
+    const compact = this.compactForSearch(coreKeyword || keyword);
+    if (compact && /[\u0600-\u06FF]/.test(compact) && !tokens.includes(compact)) tokens.push(compact);
 
-    for (const token of this.tokenizeForSearch(coreKeyword || keyword)) {
-      for (const alias of this.buildObservedKeywordAliases(this.compactForSearch(token))) aliases.add(alias);
+    for (const token of tokens) {
       if (!/[\u0600-\u06FF]/.test(token)) continue;
       const latin = this.transliteratePersianToken(token);
       if (latin.length >= 3) {
         aliases.add(latin);
         if (latin.includes('k')) aliases.add(latin.replace(/k/g, 'c'));
+        for (const vowelized of this.buildVowelizedLatinAliases(latin)) aliases.add(vowelized);
       }
     }
 

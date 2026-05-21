@@ -51,6 +51,15 @@ interface ExportLinkRow {
   link: string;
 }
 
+interface ExportGroupRow {
+  keyword?: string;
+  type: string;
+  uid: string;
+  title: string;
+  inviteLink: string;
+  messageLinks: string[];
+}
+
 interface KeywordSheetBatch {
   inputSheetName: string;
   keywords: string[];
@@ -743,6 +752,76 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  private buildGroupedExportRows(rows: ExportLinkRow[]): ExportGroupRow[] {
+    const groups = new Map<string, ExportGroupRow>();
+    const ensureGroup = (key: string, initial: ExportGroupRow): ExportGroupRow => {
+      const existing = groups.get(key);
+      if (existing) {
+        if (!existing.keyword && initial.keyword) existing.keyword = initial.keyword;
+        if (!existing.title && initial.title) existing.title = initial.title;
+        if (!existing.inviteLink && initial.inviteLink) existing.inviteLink = initial.inviteLink;
+        return existing;
+      }
+      groups.set(key, initial);
+      return initial;
+    };
+
+    for (const row of rows) {
+      if (row.type === 'message') {
+        const group = ensureGroup(`${row.keyword || ''}|channel|${row.channel}`, {
+          keyword: row.keyword,
+          type: 'channel_messages',
+          uid: row.channel,
+          title: '',
+          inviteLink: '',
+          messageLinks: []
+        });
+        if (!group.messageLinks.includes(row.link)) group.messageLinks.push(row.link);
+        continue;
+      }
+
+      if (row.type === 'chat_root' || row.type === 'private_root' || row.type === 'invite') {
+        const groupKey = row.type === 'invite'
+          ? `${row.keyword || ''}|invite|${row.link}`
+          : `${row.keyword || ''}|channel|${row.channel || row.link}`;
+        const group = ensureGroup(groupKey, {
+          keyword: row.keyword,
+          type: row.type === 'invite' ? 'invite' : 'channel_root',
+          uid: row.channel,
+          title: row.channel,
+          inviteLink: row.link,
+          messageLinks: []
+        });
+        if (!group.inviteLink) group.inviteLink = row.link;
+        continue;
+      }
+
+      const botKey = `${row.keyword || ''}|bot|${row.link}`;
+      ensureGroup(botKey, {
+        keyword: row.keyword,
+        type: 'bot',
+        uid: '',
+        title: row.channel,
+        inviteLink: row.link,
+        messageLinks: []
+      });
+    }
+
+    return Array.from(groups.values()).sort((a, b) => {
+      const k = (a.keyword || '').localeCompare(b.keyword || '', undefined, { sensitivity: 'base' });
+      if (k !== 0) return k;
+      const t = a.type.localeCompare(b.type, undefined, { sensitivity: 'base' });
+      if (t !== 0) return t;
+      const u = a.uid.localeCompare(b.uid, undefined, { sensitivity: 'base' });
+      if (u !== 0) return u;
+      return (a.inviteLink || a.messageLinks[0] || '').localeCompare(
+        b.inviteLink || b.messageLinks[0] || '',
+        undefined,
+        { sensitivity: 'base' }
+      );
+    });
+  }
+
   private async withTimeout<T>(
     promise: Promise<T>,
     timeoutMs: number,
@@ -1372,28 +1451,49 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
         usedSheetNames.add(sheetName.toLowerCase());
 
         const mergedRows = Array.from(result.rows.values());
+        const groupedRows = this.buildGroupedExportRows(mergedRows);
         exportedRowsCount += mergedRows.length;
         const worksheet = outputWorkbook.addWorksheet(sheetName);
         worksheet.columns = [
-          { key: 'type', width: 14 },
-          { key: 'channel', width: 28 },
-          { key: 'uid', width: 16 },
-          { key: 'link', width: 72 }
+          { key: 'keyword', width: 28 },
+          { key: 'type', width: 18 },
+          { key: 'uid', width: 18 },
+          { key: 'title', width: 32 },
+          { key: 'inviteLink', width: 72 },
+          { key: 'messageCount', width: 14 },
+          { key: 'messageLinks', width: 90 }
         ];
-        const headerRow = worksheet.addRow(['نوع', 'کانال', 'شناسه', 'لینک']);
+        const headerRow = worksheet.addRow([
+          'کلمه',
+          'نوع',
+          'Telegram UID / Channel',
+          'Title',
+          'Invite / Root / Bot Link',
+          'تعداد پیام',
+          'Message Links'
+        ]);
         headerRow.font = { bold: true };
-        const useHyperlinks = hyperlinkRowLimit > 0 && mergedRows.length <= hyperlinkRowLimit;
+        const useHyperlinks = hyperlinkRowLimit > 0 && groupedRows.length <= hyperlinkRowLimit;
         if (!mergedRows.length && !result.errors.length) {
-          worksheet.addRow(['اطلاعات', '', '', 'لینکی پیدا نشد']);
+          worksheet.addRow(['', 'اطلاعات', '', '', 'لینکی پیدا نشد', 0, '']);
         } else {
-          for (const row of mergedRows) {
-            const worksheetRow = worksheet.addRow([row.type, row.channel, row.uid, row.link]);
-            if (useHyperlinks && /^https?:\/\//i.test(row.link)) {
-              worksheetRow.getCell(4).value = { text: row.link, hyperlink: row.link };
+          for (const row of groupedRows) {
+            const worksheetRow = worksheet.addRow([
+              row.keyword || '',
+              row.type,
+              row.uid,
+              row.title,
+              row.inviteLink,
+              row.messageLinks.length,
+              row.messageLinks.join('\n')
+            ]);
+            worksheetRow.alignment = { vertical: 'top', wrapText: true };
+            if (useHyperlinks && /^https?:\/\//i.test(row.inviteLink)) {
+              worksheetRow.getCell(5).value = { text: row.inviteLink, hyperlink: row.inviteLink };
             }
           }
           for (const err of result.errors) {
-            worksheet.addRow(['خطا', '', '', err]);
+            worksheet.addRow(['', 'خطا', '', '', err, 0, '']);
           }
         }
       }
