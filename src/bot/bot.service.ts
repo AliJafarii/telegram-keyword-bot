@@ -36,6 +36,13 @@ interface GroupedChannelLinks {
   links: string[];
 }
 
+interface SearchMessageGroup {
+  uid: string;
+  title: string;
+  inviteLink: string;
+  messageLinks: string[];
+}
+
 interface CrawlRunResult {
   searchRef: string;
   crawl: KeywordCrawlResultDto;
@@ -65,7 +72,27 @@ interface KeywordSheetBatch {
   keywords: string[];
 }
 
-type ChatInputMode = 'keyword' | 'excel';
+interface LinkImportResult {
+  link?: string;
+  type?: string;
+  status?: string;
+  chatId?: number;
+  chatKey?: string;
+  title?: string;
+  username?: string;
+  inviteLink?: string;
+  extractedLinks?: string[];
+  error?: string;
+}
+
+interface LinkImportPayload {
+  generatedAt?: string;
+  dryRun?: boolean;
+  inputLinks?: number;
+  results?: LinkImportResult[];
+}
+
+type ChatInputMode = 'keyword' | 'excel' | 'links';
 
 @Injectable()
 export class BotService implements OnModuleInit, OnModuleDestroy {
@@ -75,13 +102,15 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
   private readonly inMemoryResults = new Map<string, InMemorySearchResult>();
   private readonly inMemoryTtlMs = 12 * 60 * 60 * 1000;
   private readonly pendingInputMode = new Map<number, ChatInputMode>();
+  private readonly linkImportTextBuffers = new Map<number, string[]>();
   private readonly menuSearchOneKeyword = 'جستجوی یک کلمه';
   private readonly menuImportExcel = 'ارسال فایل اکسل';
+  private readonly menuImportLinks = 'اضافه کردن لینک‌ها';
   private botLaunchLoop?: Promise<void>;
   private botLaunchAttempts = 0;
   private botShutdownRequested = false;
   private readonly mainMenuKeyboard = Markup.keyboard(
-    [[this.menuSearchOneKeyword], [this.menuImportExcel]]
+    [[this.menuSearchOneKeyword], [this.menuImportExcel], [this.menuImportLinks]]
   ).resize();
 
   constructor(
@@ -161,6 +190,7 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       }
       if (ctx.chat?.id) {
         this.pendingInputMode.delete(ctx.chat.id);
+        this.linkImportTextBuffers.delete(ctx.chat.id);
       }
       return ctx.reply(
         'سلام 👋 یکی از گزینه‌های منو را انتخاب کن.',
@@ -177,17 +207,31 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
 
       if (text === this.menuSearchOneKeyword) {
         this.pendingInputMode.set(chatId, 'keyword');
+        this.linkImportTextBuffers.delete(chatId);
         return ctx.reply('لطفاً یک کلمه یا عبارت بفرست تا سریع جستجو کنم.', this.mainMenuKeyboard);
       }
 
       if (text === this.menuImportExcel) {
         this.pendingInputMode.set(chatId, 'excel');
+        this.linkImportTextBuffers.delete(chatId);
         return ctx.reply('لطفاً فایل اکسل را بفرست؛ هر ردیف باید یک کلمه داشته باشد.', this.mainMenuKeyboard);
+      }
+
+      if (text === this.menuImportLinks) {
+        this.pendingInputMode.set(chatId, 'links');
+        this.linkImportTextBuffers.set(chatId, []);
+        return ctx.reply(
+          'لطفاً فایل اکسل لینک‌ها را بفرست، یا لینک‌ها را در چند پیام پشت‌سرهم بفرست و آخرش بنویس «تمام» یا «پردازش».',
+          this.mainMenuKeyboard
+        );
       }
 
       const mode = this.pendingInputMode.get(chatId);
       if (mode === 'excel') {
         return ctx.reply('حالت اکسل فعال است؛ لطفاً فایل با پسوند xlsx یا xls بفرست.', this.mainMenuKeyboard);
+      }
+      if (mode === 'links') {
+        return this.handleLinkImportText(ctx as any, text);
       }
       if (mode === 'keyword') {
         this.pendingInputMode.delete(chatId);
@@ -202,6 +246,10 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     });
 
     this.bot.on('document', async (ctx) => {
+      const chatId = ctx.chat?.id as number | undefined;
+      if (chatId && this.pendingInputMode.get(chatId) === 'links') {
+        return this.handleLinkImportFile(ctx as any);
+      }
       return this.handleKeywordFile(ctx as any);
     });
 
@@ -638,6 +686,10 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     return [title, ...links.map((link) => 'ـ ' + link)].join('\n');
   }
 
+  private formatPlainLinks(links: string[]): string {
+    return links.join('\n');
+  }
+
   private formatGroupedMessages(title: string, groups: GroupedChannelLinks[]): string {
     if (!groups.length) return '';
     const body = groups
@@ -647,6 +699,20 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       ].join('\n'))
       .join('\n\n');
     return title + '\n' + body;
+  }
+
+  private formatSearchMessageGroups(title: string, groups: SearchMessageGroup[]): string {
+    if (!groups.length) return '';
+    const body = groups
+      .map((entry) => [
+        '---------------------------------',
+        'Telegram UID: ' + (entry.uid || ''),
+        'Title: ' + (entry.title || ''),
+        'Invite Link: ' + (entry.inviteLink || ''),
+        ...entry.messageLinks
+      ].join('\n'))
+      .join('\n');
+    return body + '\n---------------------------------';
   }
 
   private summarizeClientLinks(links: string[]): string {
@@ -1524,6 +1590,413 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private parseImportLinksPayload(stdout: string): LinkImportPayload {
+    const start = stdout.indexOf('{');
+    const end = stdout.lastIndexOf('}');
+    if (start < 0 || end <= start) return {};
+    try {
+      return JSON.parse(stdout.slice(start, end + 1));
+    } catch {
+      return {};
+    }
+  }
+
+  private linkImportReason(item: LinkImportResult): string {
+    if (item.error) return item.error;
+    if (item.status === 'stored' && item.type === 'private_message') {
+      return 'لینک پیام خصوصی t.me/c است؛ بدون invite یا عضویت قبلی فقط ذخیره می‌شود و join مستقیم ندارد.';
+    }
+    if (item.status === 'stored' && item.type === 'public_message') {
+      return 'لینک پیام عمومی ذخیره شده؛ اگر join فعال باشد، عضویت همان گروه یا چنل هم امتحان می‌شود.';
+    }
+    if (item.status === 'started' && item.type === 'bot' && !item.extractedLinks?.length) {
+      return 'بات start شده ولی در تاریخچه اخیر لینک تلگرام قابل استخراج پیدا نشده است.';
+    }
+    if (item.status === 'joined') return 'عضویت انجام شد.';
+    if (item.status === 'join_requested') return 'درخواست عضویت ارسال شد و نیاز به تایید ادمین دارد.';
+    if (item.status === 'already_joined') return 'اکانت از قبل عضو بوده است.';
+    if (item.status === 'flood_wait') return 'تلگرام برای این عملیات محدودیت زمانی FloodWait داده؛ بعد از پایان زمان انتظار باید دوباره تست شود.';
+    return '';
+  }
+
+  private compactImportCounts(results: LinkImportResult[], key: 'status' | 'type'): Array<{ name: string; count: number }> {
+    const counts = new Map<string, number>();
+    for (const item of results) {
+      const value = String(item[key] || 'unknown');
+      counts.set(value, (counts.get(value) || 0) + 1);
+    }
+    return Array.from(counts.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([name, count]) => ({ name, count }));
+  }
+
+  private async buildLinkImportWorkbook(payload: LinkImportPayload): Promise<Buffer> {
+    const results = Array.isArray(payload.results) ? payload.results : [];
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'telegram-search-bot';
+    workbook.created = new Date();
+
+    const addRowsSheet = (name: string, columns: Partial<ExcelJS.Column>[], rows: Record<string, any>[]) => {
+      const sheet = workbook.addWorksheet(name);
+      sheet.columns = columns;
+      sheet.addRows(rows);
+      sheet.views = [{ state: 'frozen', ySplit: 1 }];
+      sheet.getRow(1).font = { bold: true };
+      sheet.autoFilter = {
+        from: { row: 1, column: 1 },
+        to: { row: Math.max(1, rows.length + 1), column: columns.length }
+      };
+      for (const column of sheet.columns) {
+        let width = Number(column.width || 12);
+        column.eachCell?.({ includeEmpty: false }, (cell) => {
+          width = Math.min(Math.max(width, String(cell.value || '').length + 2), 80);
+        });
+        column.width = width;
+      }
+      return sheet;
+    };
+
+    const statusCounts = this.compactImportCounts(results, 'status');
+    const typeCounts = this.compactImportCounts(results, 'type');
+    const errorCounts = new Map<string, number>();
+    for (const item of results) {
+      if (!item.error) continue;
+      errorCounts.set(item.error, (errorCounts.get(item.error) || 0) + 1);
+    }
+
+    const botRows = results
+      .filter((item) => item.type === 'bot')
+      .map((item) => ({
+        section: 'bot_links',
+        title: item.title || item.username || item.chatKey || '',
+        chatKey: item.chatKey || item.username || '',
+        type: item.type || '',
+        inviteLink: item.link || item.inviteLink || '',
+        messageLinksCount: '',
+        messageLinks: ''
+      }));
+
+    const grouped = new Map<string, {
+      title: string;
+      chatKey: string;
+      type: string;
+      inviteLink: string;
+      messageLinks: string[];
+    }>();
+    const ensureGroup = (item: LinkImportResult) => {
+      const key = item.chatKey || item.inviteLink || item.username || item.link || 'unknown';
+      const current = grouped.get(key) || {
+        title: item.title || item.username || item.chatKey || '',
+        chatKey: item.chatKey || item.username || '',
+        type: item.type || '',
+        inviteLink: item.inviteLink || '',
+        messageLinks: []
+      };
+      if (!current.title && (item.title || item.username)) current.title = item.title || item.username || '';
+      if (!current.chatKey && (item.chatKey || item.username)) current.chatKey = item.chatKey || item.username || '';
+      if (!current.inviteLink && item.inviteLink) current.inviteLink = item.inviteLink;
+      if (!current.type && item.type) current.type = item.type;
+      grouped.set(key, current);
+      return current;
+    };
+    for (const item of results) {
+      if (item.type === 'bot') continue;
+      const isMessage = item.type === 'public_message' || item.type === 'private_message';
+      const isChat = item.type === 'public_chat' || item.type === 'private_chat' || item.type === 'invite';
+      if (!isMessage && !isChat) continue;
+      const group = ensureGroup(item);
+      if (isMessage && item.link && !group.messageLinks.includes(item.link)) {
+        group.messageLinks.push(item.link);
+      }
+    }
+    const groupedRows = [
+      ...botRows,
+      ...Array.from(grouped.values())
+        .sort((a, b) => (a.title || a.chatKey || a.inviteLink).localeCompare(b.title || b.chatKey || b.inviteLink))
+        .map((item) => ({
+          section: 'chat_or_group',
+          title: item.title,
+          chatKey: item.chatKey,
+          type: item.type,
+          inviteLink: item.inviteLink,
+          messageLinksCount: item.messageLinks.length,
+          messageLinks: item.messageLinks.join('\n')
+        }))
+    ];
+
+    const groupedSheet = addRowsSheet('grouped_output', [
+      { header: 'section', key: 'section', width: 16 },
+      { header: 'title', key: 'title', width: 32 },
+      { header: 'chatKey', key: 'chatKey', width: 28 },
+      { header: 'type', key: 'type', width: 18 },
+      { header: 'inviteLink', key: 'inviteLink', width: 60 },
+      { header: 'messageLinksCount', key: 'messageLinksCount', width: 20 },
+      { header: 'messageLinks', key: 'messageLinks', width: 90 }
+    ], groupedRows);
+    groupedSheet.getColumn('messageLinks').alignment = { wrapText: true, vertical: 'top' };
+
+    addRowsSheet('summary', [
+      { header: 'metric', key: 'metric', width: 28 },
+      { header: 'value', key: 'value', width: 18 },
+      { header: 'note', key: 'note', width: 70 }
+    ], [
+      { metric: 'generatedAt', value: payload.generatedAt || '', note: '' },
+      { metric: 'inputLinks', value: payload.inputLinks ?? results.length, note: 'لینک‌های یکتای خوانده شده از فایل ورودی' },
+      { metric: 'results', value: results.length, note: 'تعداد ردیف‌های پردازش شده' },
+      { metric: 'extractedLinks', value: results.reduce((sum, item) => sum + (item.extractedLinks?.length || 0), 0), note: 'لینک‌های پیدا شده داخل پاسخ بات‌ها' },
+      { metric: 'errors', value: results.filter((item) => item.error).length, note: 'ردیف‌هایی که خطای فنی یا تلگرامی گرفته‌اند' },
+      ...statusCounts.map((item) => ({ metric: 'status:' + item.name, value: item.count, note: '' })),
+      ...typeCounts.map((item) => ({ metric: 'type:' + item.name, value: item.count, note: '' }))
+    ]);
+
+    addRowsSheet('results', [
+      { header: 'row', key: 'row', width: 8 },
+      { header: 'link', key: 'link', width: 55 },
+      { header: 'type', key: 'type', width: 18 },
+      { header: 'status', key: 'status', width: 18 },
+      { header: 'chatId', key: 'chatId', width: 12 },
+      { header: 'chatKey', key: 'chatKey', width: 26 },
+      { header: 'username', key: 'username', width: 24 },
+      { header: 'title', key: 'title', width: 30 },
+      { header: 'inviteLink', key: 'inviteLink', width: 55 },
+      { header: 'extractedLinksCount', key: 'extractedLinksCount', width: 20 },
+      { header: 'reason', key: 'reason', width: 70 },
+      { header: 'error', key: 'error', width: 70 }
+    ], results.map((item, index) => ({
+      row: index + 1,
+      link: item.link || '',
+      type: item.type || '',
+      status: item.status || '',
+      chatId: item.chatId || '',
+      chatKey: item.chatKey || '',
+      username: item.username || '',
+      title: item.title || '',
+      inviteLink: item.inviteLink || '',
+      extractedLinksCount: item.extractedLinks?.length || 0,
+      reason: this.linkImportReason(item),
+      error: item.error || ''
+    })));
+
+    addRowsSheet('errors', [
+      { header: 'error', key: 'error', width: 90 },
+      { header: 'count', key: 'count', width: 12 }
+    ], Array.from(errorCounts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([error, count]) => ({ error, count })));
+
+    addRowsSheet('extracted_links', [
+      { header: 'sourceLink', key: 'sourceLink', width: 55 },
+      { header: 'sourceType', key: 'sourceType', width: 18 },
+      { header: 'sourceStatus', key: 'sourceStatus', width: 18 },
+      { header: 'extractedLink', key: 'extractedLink', width: 55 }
+    ], results.flatMap((item) => (item.extractedLinks || []).map((link) => ({
+      sourceLink: item.link || '',
+      sourceType: item.type || '',
+      sourceStatus: item.status || '',
+      extractedLink: link
+    }))));
+
+    return Buffer.from(await workbook.xlsx.writeBuffer());
+  }
+
+  private summarizeImportLinks(stdout: string): string {
+    const payload = this.parseImportLinksPayload(stdout);
+    const results = Array.isArray(payload.results) ? payload.results : [];
+    const statusCounts = new Map<string, number>();
+    const typeCounts = new Map<string, number>();
+    let nestedLinks = 0;
+    let errors = 0;
+    for (const item of results) {
+      const status = item.status || 'unknown';
+      const type = item.type || 'unknown';
+      statusCounts.set(status, (statusCounts.get(status) || 0) + 1);
+      typeCounts.set(type, (typeCounts.get(type) || 0) + 1);
+      nestedLinks += Array.isArray(item.extractedLinks) ? item.extractedLinks.length : 0;
+      if (item.error) errors += 1;
+    }
+
+    const compactCounts = (counts: Map<string, number>) =>
+      Array.from(counts.entries())
+        .sort((a, b) => a[0].localeCompare(b[0]))
+        .map(([key, value]) => `${key}: ${value}`)
+        .join('\\n');
+
+    return [
+      'پردازش لینک‌ها تمام شد ✅',
+      `لینک‌های ورودی: ${payload.inputLinks ?? results.length}`,
+      `نتیجه‌های ذخیره‌شده: ${results.length}`,
+      `لینک‌های استخراج‌شده از بات‌ها: ${nestedLinks}`,
+      `خطاها: ${errors}`,
+      '',
+      'وضعیت‌ها:',
+      compactCounts(statusCounts) || '-',
+      '',
+      'نوع لینک‌ها:',
+      compactCounts(typeCounts) || '-'
+    ].join('\\n');
+  }
+
+  private async handleLinkImportFile(ctx: any) {
+    const chatId = ctx.chat?.id as number | undefined;
+    if (!chatId) return;
+
+    if (this.runningChats.has(chatId)) {
+      return ctx.reply('یک پردازش هنوز در حال اجراست؛ لطفاً چند لحظه صبر کن.', this.mainMenuKeyboard);
+    }
+
+    const doc = (ctx.message as any)?.document;
+    if (!doc?.file_id) {
+      return ctx.reply('لطفاً یک فایل اکسل معتبر با پسوند xlsx بفرست.', this.mainMenuKeyboard);
+    }
+    const fileName = String(doc.file_name || '').trim().toLowerCase();
+    if (!fileName.endsWith('.xlsx') && !fileName.endsWith('.xls')) {
+      return ctx.reply('برای اضافه کردن لینک‌ها فقط فایل xlsx یا xls قابل قبول است.', this.mainMenuKeyboard);
+    }
+
+    this.runningChats.add(chatId);
+    const tmpDir = await mkdtemp(join(tmpdir(), 'telegram-link-import-'));
+    const inputPath = join(tmpDir, this.tempExcelFileName(fileName));
+    try {
+      const fileLink = await this.bot.telegram.getFileLink(doc.file_id);
+      const response = await fetch(fileLink.toString());
+      if (!response.ok) {
+        throw new Error(`failed to download file (${response.status})`);
+      }
+      const content = Buffer.from(await response.arrayBuffer());
+      const importContent = fileName.endsWith('.xls')
+        ? await this.convertLegacyExcelToXlsx(content, fileName)
+        : content;
+      await writeFile(inputPath, importContent);
+      await ctx.reply('فایل لینک‌ها دریافت شد. پردازش join/start و ذخیره‌سازی شروع شد.', this.mainMenuKeyboard);
+      await this.runLinkImport(ctx, tmpDir, ['--input', inputPath]);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.bot.telegram.sendMessage(
+        chatId,
+        `پردازش فایل لینک‌ها ناموفق بود.\nجزئیات فنی: ${message.length > 500 ? message.slice(0, 500) + '...' : message}`,
+        this.mainMenuKeyboard
+      );
+    } finally {
+      this.pendingInputMode.delete(chatId);
+      this.linkImportTextBuffers.delete(chatId);
+      this.runningChats.delete(chatId);
+      await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
+  private async handleLinkImportText(ctx: any, text: string) {
+    const chatId = ctx.chat?.id as number | undefined;
+    if (!chatId) return;
+
+    if (this.runningChats.has(chatId)) {
+      return ctx.reply('یک پردازش هنوز در حال اجراست؛ لطفاً چند لحظه صبر کن.', this.mainMenuKeyboard);
+    }
+
+    if (this.isLinkImportFinishText(text)) {
+      const collectedText = (this.linkImportTextBuffers.get(chatId) || []).join('\n');
+      if (!collectedText) {
+        return ctx.reply('هنوز لینکی جمع نشده؛ لینک‌ها را بفرست یا فایل xlsx بده.', this.mainMenuKeyboard);
+      }
+      return this.processBufferedLinkImportText(ctx, collectedText);
+    }
+
+    const linkCount = this.countTelegramLinks(text);
+    if (!linkCount) {
+      return ctx.reply('این پیام لینک t.me نداشت. لینک‌ها را بفرست و وقتی تمام شد بنویس «تمام».', this.mainMenuKeyboard);
+    }
+
+    const buffer = this.linkImportTextBuffers.get(chatId) || [];
+    buffer.push(text);
+    this.linkImportTextBuffers.set(chatId, buffer);
+    const totalLinks = this.countTelegramLinks(buffer.join('\n'));
+    return ctx.reply(
+      `دریافت شد؛ این پیام ${linkCount} لینک داشت و تا الان حدود ${totalLinks} لینک جمع شده. وقتی همه پیام‌ها را فرستادی بنویس «تمام» یا «پردازش».`,
+      this.mainMenuKeyboard
+    );
+  }
+
+  private isLinkImportFinishText(text: string): boolean {
+    return /^(?:تمام|تموم|پایان|پردازش|شروع پردازش|انجام بده|done|process)$/i.test(text.trim());
+  }
+
+  private countTelegramLinks(text: string): number {
+    return (text.match(/(?:https?:\/\/)?(?:t|telegram)\.me\/[^\s<>)\]]+/gi) || []).length;
+  }
+
+  private async processBufferedLinkImportText(ctx: any, text: string) {
+    const chatId = ctx.chat?.id as number | undefined;
+    if (!chatId) return;
+
+    this.runningChats.add(chatId);
+    const tmpDir = await mkdtemp(join(tmpdir(), 'telegram-link-import-'));
+    const inputPath = join(tmpDir, 'telegram-link-import-input.txt');
+    try {
+      await writeFile(inputPath, text, 'utf8');
+      await ctx.reply('همه متن‌های لینک دریافت شد. پردازش join/start و ذخیره‌سازی شروع شد.', this.mainMenuKeyboard);
+      await this.runLinkImport(ctx, tmpDir, ['--input', inputPath]);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.bot.telegram.sendMessage(
+        chatId,
+        `پردازش متن لینک‌ها ناموفق بود.\nجزئیات فنی: ${message.length > 500 ? message.slice(0, 500) + '...' : message}`,
+        this.mainMenuKeyboard
+      );
+    } finally {
+      this.pendingInputMode.delete(chatId);
+      this.linkImportTextBuffers.delete(chatId);
+      this.runningChats.delete(chatId);
+      await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
+  private async runLinkImport(ctx: any, tmpDir: string, inputArgs: string[]) {
+    const chatId = ctx.chat?.id as number | undefined;
+    if (!chatId) return;
+
+    const outputPath = join(tmpDir, 'telegram-link-import-result.json');
+    const timeout = Math.max(
+      60000,
+      Number(this.config.get<number>('linkImportTimeoutMs') || 600000)
+    );
+    const { stdout, stderr } = await execFileAsync(
+      'npm',
+      [
+        'run',
+        'telegram:import-links',
+        '--',
+        ...inputArgs,
+        '--joinInvites',
+        'true',
+        '--joinPublic',
+        'true',
+        '--startBots',
+        'true',
+        '--out',
+        outputPath
+      ],
+      {
+        cwd: process.cwd(),
+        timeout,
+        maxBuffer: 20 * 1024 * 1024
+      }
+    );
+
+    const resultJson = await readFile(outputPath, 'utf8').catch(() => stdout);
+    const summary = this.summarizeImportLinks(resultJson || stdout);
+    const workbookBuffer = await this.buildLinkImportWorkbook(this.parseImportLinksPayload(resultJson || stdout));
+    await this.bot.telegram.sendDocument(chatId, {
+      source: workbookBuffer,
+      filename: `telegram-link-import-result-${Date.now()}.xlsx`
+    } as any);
+    await this.bot.telegram.sendMessage(
+      chatId,
+      stderr?.trim()
+        ? `${summary}\n\nهشدار فنی:\n${stderr.trim().slice(0, 700)}`
+        : summary,
+      this.mainMenuKeyboard
+    );
+  }
+
   private splitTextIntoChunks(text: string): string[] {
     const lines = text.split('\n');
     const chunks: string[] = [];
@@ -1632,22 +2105,25 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     const botItems = source === 'links'
       ? this.filterClientBotLinks(items as string[])
       : [];
-    const plainRootItems = source === 'links'
-      ? this.filterClientPlainRootLinks(items as string[])
-      : [];
-    const { inviteLinks, rootLinks } = source === 'links'
-      ? this.splitInviteAndRootLinks(plainRootItems)
-      : { inviteLinks: [], rootLinks: [] };
     const groupedLinkItems = source === 'links'
       ? this.groupClientMessageLinks(linkItems)
       : [];
+    const dbMessageGroups = source === 'links' && numericId !== null
+      ? await this.searchService.getMessageGroupsBySearchId(numericId)
+      : [];
+    const displayMessageGroups = dbMessageGroups.length ? dbMessageGroups : groupedLinkItems.map((entry) => ({
+      uid: entry.channelId,
+      title: entry.channelId,
+      inviteLink: '',
+      messageLinks: entry.links
+    }));
     const pageSize = source === 'web'
       ? Number(this.config.get<number>('webPageSize') || 10)
       : source === 'telegram'
         ? Number(this.config.get<number>('tgPageSize') || 5)
         : Number(this.config.get<number>('linksPageSize') || 50);
     const itemCount = source === 'links'
-      ? Math.max(groupedLinkItems.length, (botItems.length || inviteLinks.length || rootLinks.length) ? 1 : 0)
+      ? Math.max(displayMessageGroups.length, botItems.length ? 1 : 0)
       : items.length;
     if (!itemCount) {
       if (!messageId) {
@@ -1664,13 +2140,13 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     if (totalPages <= 0) return;
     const safePageIdx = Math.min(Math.max(pageIdx, 0), totalPages - 1);
 
-    const sourceItems = source === 'links' ? groupedLinkItems : items;
+    const sourceItems = source === 'links' ? displayMessageGroups : items;
     const slice = sourceItems.slice(safePageIdx * pageSize, (safePageIdx + 1) * pageSize);
     let text = source === 'web'
       ? `نتایج وب، صفحه ${safePageIdx + 1} از ${totalPages}:\n\n`
       : source === 'telegram'
         ? `نتایج تلگرام، صفحه ${safePageIdx + 1} از ${totalPages}:\n\n`
-        : `لینک‌های پیدا شده، صفحه ${safePageIdx + 1} از ${totalPages}:\n\n`;
+        : '';
 
     if (source === 'web') {
       text += slice
@@ -1691,34 +2167,13 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       }
     } else {
       const chunks: string[] = [];
-      const publicRootLinks = rootLinks.filter((link) => this.isPublicTelegramLink(link));
-      const privateRootLinks = rootLinks.filter((link) => this.isPrivateTelegramLink(link));
-      const publicGroups = (slice as GroupedChannelLinks[]).filter((entry) =>
-        entry.links.some((link) => !this.isPrivateTelegramLink(link))
-      );
-      const privateGroups = (slice as GroupedChannelLinks[]).filter((entry) =>
-        entry.links.every((link) => this.isPrivateTelegramLink(link))
-      );
-
-      if (safePageIdx === 0 && inviteLinks.length) {
-        chunks.push(this.formatLinkList('گروه‌ها یا کانال‌های خصوصی - لینک دعوت', inviteLinks));
-      }
       if (safePageIdx === 0 && botItems.length) {
-        chunks.push(this.formatLinkList('بات‌ها', botItems));
+        chunks.push(this.formatPlainLinks(botItems));
       }
-      if (safePageIdx === 0 && publicRootLinks.length) {
-        chunks.push(this.formatLinkList('کانال‌ها یا گروه‌های عمومی - لینک اصلی', publicRootLinks));
+      if ((slice as SearchMessageGroup[]).length) {
+        chunks.push(this.formatSearchMessageGroups('', slice as SearchMessageGroup[]));
       }
-      if (safePageIdx === 0 && privateRootLinks.length) {
-        chunks.push(this.formatLinkList('کانال‌ها یا گروه‌های خصوصی - لینک اصلی', privateRootLinks));
-      }
-      if (publicGroups.length) {
-        chunks.push(this.formatGroupedMessages('پیام‌های کانال‌ها یا گروه‌های عمومی', publicGroups));
-      }
-      if (privateGroups.length) {
-        chunks.push(this.formatGroupedMessages('پیام‌های کانال‌ها یا گروه‌های خصوصی', privateGroups));
-      }
-      text += chunks.join('\n\n');
+      text += chunks.join('\n');
     }
 
     const prevBtn = safePageIdx > 0

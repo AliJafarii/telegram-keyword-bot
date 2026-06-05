@@ -6,10 +6,22 @@ import { SearchEntity } from '../entities/search.entity';
 import { ChannelMatchEntity } from '../entities/channel-match.entity';
 import { CrawlStepEntity } from '../entities/crawl-step.entity';
 import { SearchLinkEntity } from '../entities/search-link.entity';
+import { TelegramChatEntity } from '../entities/telegram-chat.entity';
+import { TelegramInputLinkEntity } from '../entities/telegram-input-link.entity';
+import { TelegramMessageLinkEntity } from '../entities/telegram-message-link.entity';
 
 loadEnv({ path: process.env.ENV_FILE || '.env.production' });
 
-const entities = [UserEntity, SearchEntity, ChannelMatchEntity, CrawlStepEntity, SearchLinkEntity];
+const entities = [
+  UserEntity,
+  SearchEntity,
+  ChannelMatchEntity,
+  CrawlStepEntity,
+  SearchLinkEntity,
+  TelegramChatEntity,
+  TelegramInputLinkEntity,
+  TelegramMessageLinkEntity
+];
 const databaseType = process.env.DATABASE_TYPE || 'sqlite';
 
 const buildDataSource = (): DataSource => {

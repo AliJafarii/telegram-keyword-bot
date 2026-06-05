@@ -123,7 +123,13 @@ export class RedisStoreService implements OnModuleInit, OnModuleDestroy {
 
     const usernameMatch = normalized.match(/^https:\/\/t\.me\/([A-Za-z0-9_]+)(?:[/?#].*)?$/i);
     if (!usernameMatch?.[1] || !/bot$/i.test(usernameMatch[1])) return null;
-    return `https://t.me/${usernameMatch[1]}`;
+    return normalized;
+  }
+
+  private getBotUsername(link: string): string | null {
+    const match = link.match(/^https:\/\/t\.me\/([A-Za-z0-9_]+)(?:[/?#].*)?$/i);
+    if (!match?.[1] || !/bot$/i.test(match[1])) return null;
+    return match[1].toLowerCase();
   }
 
   private parseInviteOrRootLink(link: string): string | null {
@@ -207,6 +213,15 @@ export class RedisStoreService implements OnModuleInit, OnModuleDestroy {
     const key = this.keyMatches(searchRef);
     const rows = await this.redis.hVals(key);
     const out = new Set<string>();
+    const botUsernames = new Set<string>();
+
+    const addBotLink = (link: string | null) => {
+      if (!link) return;
+      const username = this.getBotUsername(link);
+      if (!username || botUsernames.has(username)) return;
+      botUsernames.add(username);
+      out.add(link);
+    };
 
     for (const raw of rows) {
       let row: StoredMatch | null = null;
@@ -219,7 +234,7 @@ export class RedisStoreService implements OnModuleInit, OnModuleDestroy {
 
       if (row.channelType === 'bot') {
         const botRoot = row.channelLink ? this.parseBotLink(row.channelLink) : null;
-        if (botRoot) out.add(botRoot);
+        addBotLink(botRoot);
       } else {
         const messageLink = row.messageLink ? this.parseMessageLink(row.messageLink) : null;
         if (messageLink) out.add(messageLink);
@@ -235,7 +250,7 @@ export class RedisStoreService implements OnModuleInit, OnModuleDestroy {
 
       for (const related of row.relatedLinks || []) {
         const botLink = this.parseBotLink(related);
-        if (botLink) out.add(botLink);
+        addBotLink(botLink);
         const inviteOrRoot = this.parseInviteOrRootLink(related);
         if (inviteOrRoot) out.add(inviteOrRoot);
       }

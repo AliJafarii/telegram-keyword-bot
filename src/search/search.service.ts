@@ -402,6 +402,26 @@ export class SearchService {
     return parts.join(' ').trim();
   }
 
+  private getChatTitle(chat: Api.TypeChat): string {
+    const chatAny = chat as any;
+    const title = typeof chatAny?.title === 'string' ? chatAny.title.trim() : '';
+    if (title) return title;
+    const firstName = typeof chatAny?.firstName === 'string' ? chatAny.firstName.trim() : '';
+    const lastName = typeof chatAny?.lastName === 'string' ? chatAny.lastName.trim() : '';
+    const fullName = [firstName, lastName].filter(Boolean).join(' ').trim();
+    if (fullName) return fullName;
+    const username = this.getChatUsername(chat);
+    return username || '';
+  }
+
+  private getTelegramUidFromMessageLink(link: string): string {
+    const privateMatch = link.match(/^https:\/\/t\.me\/c\/(\d+)\/\d+/i);
+    if (privateMatch?.[1]) return privateMatch[1];
+    const publicMatch = link.match(/^https:\/\/t\.me\/([A-Za-z0-9_]+)\/\d+/i);
+    if (publicMatch?.[1]) return publicMatch[1];
+    return '';
+  }
+
   private chatIdentityContainsKeyword(chat: Api.TypeChat, keywordTermSets: string[][]): boolean {
     const text = this.getChatIdentityText(chat);
     if (!text) return false;
@@ -542,6 +562,12 @@ export class SearchService {
     return withoutEmoji.replace(/[\p{P}\p{S}]/gu, '').length === 0;
   }
 
+  private extractDecoratedTitleFragments(text: string): string[] {
+    return Array.from(text.matchAll(/[«"'“”‘’\[\(（【](.*?)[»"'“”‘’\]\)）】]/gs))
+      .map((match) => String(match[1] || '').trim())
+      .filter(Boolean);
+  }
+
   private hasMediaTitleContext(text: string): boolean {
     const tokens = new Set(this.tokenizeForSearch(text));
     return [
@@ -566,13 +592,10 @@ export class SearchService {
     const compactKeyword = keywordTerms.map((term) => this.compactForSearch(term)).join('');
     if (compactKeyword.length < 3) return false;
 
-    const quoteMatches = Array.from(text.matchAll(/[«"'“”‘’](.*?)[»"'“”‘’]/gs));
-    for (const match of quoteMatches) {
-      const inner = String(match[1] || '');
+    for (const inner of this.extractDecoratedTitleFragments(text)) {
       if (this.isMostlyEmojiOrSymbols(inner)) return true;
     }
-
-    return /(?:[\p{Emoji_Presentation}\p{Extended_Pictographic}\uFE0F]\s*){2,}/u.test(text);
+    return false;
   }
 
   private tokenizeForSearch(text: string): string[] {
@@ -1285,13 +1308,6 @@ export class SearchService {
         abortSignal
       );
       if (!targetHasKeyword) {
-        if (this.chatIdentityContainsKeyword(resolved, keywordTermSets)) {
-          await this.logStep(searchId, 'iterative_link_target_keyword_fallback_identity', {
-            link: parsed.canonical,
-            messageId: parsed.messageId
-          });
-          return resolved;
-        }
         await this.logStep(searchId, 'iterative_link_target_keyword_miss', {
           link: parsed.canonical,
           messageId: parsed.messageId
@@ -1629,6 +1645,12 @@ export class SearchService {
     return Boolean(match?.[1] && /bot$/i.test(match[1]));
   }
 
+  private getBotUsernameFromLink(link: string): string | null {
+    const match = link.match(/^https:\/\/t\.me\/([A-Za-z0-9_]+)(?:[/?#].*)?$/i);
+    if (!match?.[1] || !/bot$/i.test(match[1])) return null;
+    return match[1].toLowerCase();
+  }
+
   private toClientLinkFromParsedTarget(parsed: ParsedTargetLink): string | null {
     switch (parsed.kind) {
       case 'bot':
@@ -1851,6 +1873,23 @@ export class SearchService {
     linkType: string,
     channelMatchId?: number | null
   ): Promise<void> {
+    const botUsername = linkType === 'bot' ? this.getBotUsernameFromLink(link) : null;
+    if (botUsername) {
+      const existingBotRows = await this.searchLinkRepo.find({
+        where: { search_id: searchId, link_type: 'bot' } as any,
+        order: { id: 'ASC' } as any
+      });
+      const existingBot = existingBotRows.find((row) =>
+        this.getBotUsernameFromLink(String(row.link || '')) === botUsername
+      );
+      if (existingBot) {
+        if (channelMatchId && !existingBot.channel_match_id) {
+          await this.searchLinkRepo.update(existingBot.id, { channel_match_id: channelMatchId } as any);
+        }
+        return;
+      }
+    }
+
     const existing = await this.searchLinkRepo.findOne({
       where: { search_id: searchId, link } as any
     });
@@ -1881,6 +1920,41 @@ export class SearchService {
         .filter((row) => (row.link_type || '').toLowerCase() !== 'related')
         .map((row) => String(row.link || '').trim())
         .filter(Boolean);
+    } catch {
+      return [];
+    }
+  }
+
+  async getMessageGroupsBySearchId(searchId: number): Promise<Array<{
+    uid: string;
+    title: string;
+    inviteLink: string;
+    messageLinks: string[];
+  }>> {
+    if (!Number.isFinite(searchId) || searchId <= 0) return [];
+    try {
+      const rows = await this.channelRepo.find({
+        where: { search_id: searchId } as any,
+        order: { channel: 'ASC', message_id: 'ASC', id: 'ASC' } as any
+      });
+      const groups = new Map<string, { uid: string; title: string; inviteLink: string; messageLinks: string[] }>();
+      for (const row of rows) {
+        const messageLink = String(row.message_link || '').trim();
+        if (!messageLink) continue;
+        const channelLink = String(row.channel_link || '').trim();
+        const discoveredVia = String(row.discovered_via_link || '').trim();
+        const uid = this.getTelegramUidFromMessageLink(messageLink) || String(row.channel || '').trim();
+        const title = String(row.discovered_from_channel || row.channel || channelLink || '').trim();
+        const inviteLink = discoveredVia || channelLink;
+        const key = channelLink || discoveredVia || String(row.channel || '').trim() || messageLink;
+        const group = groups.get(key) || { uid, title, inviteLink, messageLinks: [] };
+        if (!group.uid && uid) group.uid = uid;
+        if (!group.title && title) group.title = title;
+        if (!group.inviteLink && inviteLink) group.inviteLink = inviteLink;
+        if (!group.messageLinks.includes(messageLink)) group.messageLinks.push(messageLink);
+        groups.set(key, group);
+      }
+      return Array.from(groups.values());
     } catch {
       return [];
     }
@@ -2259,6 +2333,7 @@ export class SearchService {
 
         const chatKey = this.getChatKey(chat);
         const chatUsername = this.getChatUsername(chat);
+        const chatTitle = this.getChatTitle(chat);
         const chatChannelLink = this.buildChannelLink(chat);
         const selfPublicLink = chatUsername
           ? this.canonicalizeTelegramLink(`https://t.me/${chatUsername}`)
@@ -2452,7 +2527,7 @@ export class SearchService {
                 iterationNo: iterations,
                 discoveredViaLink: frontierItem.discoveredViaLink,
                 discoveredFromMessageLink: frontierItem.discoveredFromMessageLink,
-                discoveredFromChannel: frontierItem.discoveredFromChannel,
+                discoveredFromChannel: chatTitle || frontierItem.discoveredFromChannel,
                 relatedLinks: filteredLinks,
                 mediaMetadata,
                 metadataQuery: metadataKeywordMatch ? keyword : undefined

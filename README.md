@@ -32,6 +32,11 @@ If schema is irreparably dirty and data can be removed:
   - output keeps sheet grouping (one output sheet per input sheet)
   - each row includes `type`, `channel`, `uid`, `link` (merged by sheet, not split by keyword)
 - Results are paginated in Telegram (links default: 50 per page via `LINKS_PAGE_SIZE`)
+- Link import is available as a repeatable CLI:
+  - `npm run telegram:import-links -- --input links.txt --joinInvites true --joinPublic true --startBots true`
+  - use `--parseOnly true` first when you only want to validate extraction without Telegram or database actions.
+  - input can be plain text or `.xlsx`; the tool normalizes Telegram links, imports invite links, joins public chats, starts bot deep links, extracts nested Telegram links from bot replies, and persists the mapping.
+  - persisted tables: `telegram_chats`, `telegram_input_links`, `telegram_message_links`
 - Link output format:
   - bot links are listed first as clickable links (including deep links like `?start=...`)
   - non-message root links (public roots and invites) are listed as clickable links

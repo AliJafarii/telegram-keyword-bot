@@ -45,7 +45,7 @@ export default () => ({
   tgDynamicMsgLimit: Number(process.env.TG_DYNAMIC_MSG_LIMIT || 20),
   crawlDepth: Number(process.env.CRAWL_DEPTH || 10),
   crawlIterations: Number(process.env.CRAWL_ITERATIONS || 5),
-  crawlMsgLimit: Number(process.env.CRAWL_MSG_LIMIT || 1000),
+  crawlMsgLimit: Number(process.env.CRAWL_MSG_LIMIT || 10000),
   crawlSearchPageSize: Number(process.env.CRAWL_SEARCH_PAGE_SIZE || 20),
   crawlSearchPagesPerChat: Number(process.env.CRAWL_SEARCH_PAGES_PER_CHAT || 30),
   crawlMaxRuntimeMs: Number(process.env.CRAWL_MAX_RUNTIME_MS || 600000),
