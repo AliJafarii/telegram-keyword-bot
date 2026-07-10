@@ -13,7 +13,7 @@ export class TelegramMessageLinkEntity {
   @Column({ type: 'varchar', length: 512 })
   message_link!: string;
 
-  @Column({ type: 'integer', nullable: true })
+  @Column({ type: 'bigint', nullable: true })
   message_id?: number | null;
 
   @Column({ type: 'varchar', length: 512, nullable: true })
