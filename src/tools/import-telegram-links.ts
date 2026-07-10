@@ -338,13 +338,23 @@ async function invokeWithTimeout<T>(promise: Promise<T>, timeoutMs: number, labe
 
 async function upsertChat(input: ChatUpsertInput): Promise<TelegramChatEntity> {
   const repo = AppDataSource.getRepository(TelegramChatEntity);
-  const existing = await repo.findOne({ where: { chat_key: input.chatKey } });
-  const row = existing || repo.create({ chat_key: input.chatKey });
+  const existingByChatKey = await repo.findOne({ where: { chat_key: input.chatKey } });
+  const existingByInviteLink = input.inviteLink
+    ? await repo.findOne({ where: { invite_link: input.inviteLink } })
+    : null;
+  const row = existingByChatKey || existingByInviteLink || repo.create({ chat_key: input.chatKey });
+  const inviteLinkBelongsToAnotherRow = Boolean(
+    existingByChatKey
+    && existingByInviteLink
+    && existingByChatKey.id !== existingByInviteLink.id
+  );
+
+  row.chat_key = row.chat_key || input.chatKey;
   row.chat_type = input.chatType;
   row.title = input.title || row.title || null;
   row.username = input.username || row.username || null;
   row.public_link = input.publicLink || row.public_link || null;
-  row.invite_link = input.inviteLink || row.invite_link || null;
+  row.invite_link = inviteLinkBelongsToAnotherRow ? row.invite_link || null : input.inviteLink || row.invite_link || null;
   row.private_uid = input.privateUid || row.private_uid || null;
   row.join_status = input.joinStatus;
   row.last_error = input.error || null;

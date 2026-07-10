@@ -124,14 +124,22 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
     const token = this.config.get<string>('botToken') || '';
     const proxyUrl = process.env.SOCKS_PROXY;
     const agent = proxyUrl ? new SocksProxyAgent(proxyUrl) : undefined;
-    this.bot = new Telegraf(token, agent ? { telegram: { agent } } : undefined);
+    const handlerTimeout = Math.max(
+      90000,
+      Number(this.config.get<number>('botHandlerTimeoutMs') || 3600000)
+    );
+    this.bot = new Telegraf(token, {
+      handlerTimeout,
+      ...(agent ? { telegram: { agent } } : {})
+    });
   }
 
   async onModuleInit() {
     this.logger.log('Bot initializing...');
     this.logger.log('Bot runtime profile', {
       envFile: process.env.ENV_FILE || '.env.production',
-      proxyEnabled: Boolean(process.env.SOCKS_PROXY)
+      proxyEnabled: Boolean(process.env.SOCKS_PROXY),
+      handlerTimeoutMs: this.config.get<number>('botHandlerTimeoutMs')
     });
     this.registerHandlers();
     try {
@@ -161,9 +169,14 @@ export class BotService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn('Bot setMyCommands failed', { error: message });
     }
 
-    this.bot.catch((err) => {
+    this.bot.catch((err, ctx) => {
       const message = err instanceof Error ? err.message : String(err);
       this.logger.error('Bot error', message);
+      this.logger.warn('Bot error context', {
+        updateType: ctx.updateType,
+        chatId: ctx.chat?.id,
+        fromId: ctx.from?.id
+      });
     });
 
     this.ensureBotLaunchLoop();

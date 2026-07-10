@@ -613,6 +613,91 @@ export class SearchService {
     return compact ? [compact] : [];
   }
 
+  private meaningfulKeywordTerms(keyword: string): string[] {
+    const stopWords = new Set([
+      'و',
+      'یا',
+      'با',
+      'به',
+      'از',
+      'در',
+      'را',
+      'برای',
+      'که',
+      'این',
+      'آن',
+      'the',
+      'and',
+      'or',
+      'with',
+      'by',
+      'for',
+      'of',
+      'in',
+      'to'
+    ]);
+    return this.splitKeywordTerms(keyword).filter((token) => !stopWords.has(token));
+  }
+
+  private buildBoundedAliasTermSets(terms: string[]): string[][] {
+    const aliasesByTerm: Record<string, string[]> = {
+      گیت: ['git'],
+      گیتهاب: ['github'],
+      جادی: ['jadi']
+    };
+    let variants: string[][] = [terms];
+    for (let i = 0; i < terms.length; i += 1) {
+      const aliases = aliasesByTerm[terms[i]];
+      if (!aliases?.length) continue;
+      const additions = variants.flatMap((variant) =>
+        aliases.map((alias) => {
+          const next = variant.slice();
+          next[i] = alias;
+          return next;
+        })
+      );
+      variants = [...variants, ...additions].slice(0, 12);
+    }
+    return variants.filter((variant, index) =>
+      index > 0 && variant.some((term, termIndex) => term !== terms[termIndex])
+    );
+  }
+
+  private buildFocusedPhraseSeedQueries(terms: string[]): string[] {
+    if (terms.length < 3) return [];
+    const out: string[] = [];
+    const add = (parts: string[]) => {
+      const query = parts.filter(Boolean).join(' ').trim();
+      if (query) out.push(query);
+    };
+
+    for (let i = 0; i < terms.length - 1; i += 1) add(terms.slice(i, i + 2));
+    for (let i = 0; i < terms.length - 2; i += 1) add(terms.slice(i, i + 3));
+
+    const important = terms.filter((term) =>
+      /[a-z]/i.test(term) || /\d/.test(term) || term.length >= 4
+    );
+    const tail = terms[terms.length - 1];
+    for (const term of important) {
+      if (term !== tail) add([term, tail]);
+    }
+
+    const normalized = out.map((query) => this.normalizeForSearch(query));
+    return out.filter((query, index) => normalized.indexOf(normalized[index]) === index).slice(0, 10);
+  }
+
+  private buildAliasSeedQueries(query: string): string[] {
+    const aliasByTerm: Record<string, string> = {
+      گیتهاب: 'github',
+      گیت: 'git',
+      جادی: 'jadi'
+    };
+    const terms = this.meaningfulKeywordTerms(query);
+    const replaced = terms.map((term) => aliasByTerm[term] || term).join(' ').trim();
+    const normalized = terms.join(' ').trim();
+    return replaced && replaced !== normalized ? [replaced] : [];
+  }
+
   private addKeywordQuery(out: string[], seen: Set<string>, query: string): void {
     const normalized = query.replace(/\s+/g, ' ').trim();
     if (normalized.length < 2) return;
@@ -755,7 +840,7 @@ export class SearchService {
       'show'
     ]);
     return this.tokenizeForSearch(keyword)
-      .filter((token) => !stopWords.has(token) && !/^\d+$/.test(token))
+      .filter((token) => !stopWords.has(token))
       .join(' ')
       .trim();
   }
@@ -763,21 +848,28 @@ export class SearchService {
   private buildKeywordTermSets(keyword: string): string[][] {
     const sets: string[][] = [];
     const seen = new Set<string>();
-    const add = (query: string) => {
-      const terms = this.splitKeywordTerms(query);
+    const addTerms = (terms: string[]) => {
       if (!terms.length) return;
       const key = terms.join('\u0000');
       if (seen.has(key)) return;
       seen.add(key);
       sets.push(terms);
     };
+    const add = (query: string) => addTerms(this.meaningfulKeywordTerms(query));
 
+    const meaningfulTerms = this.meaningfulKeywordTerms(keyword);
+    const isMultiTermPhrase = meaningfulTerms.length >= 3;
     add(keyword);
+    if (isMultiTermPhrase) {
+      for (const aliasTerms of this.buildBoundedAliasTermSets(meaningfulTerms)) addTerms(aliasTerms);
+    }
     const coreKeyword = this.stripMediaIntentTerms(keyword);
     if (coreKeyword && coreKeyword !== this.normalizeForSearch(keyword).replace(/\s+/g, ' ')) add(coreKeyword);
     const compact = this.compactForSearch(keyword);
     if (compact && compact !== this.normalizeForSearch(keyword).replace(/\s+/g, '')) add(compact);
-    for (const alias of this.buildLatinKeywordAliases(keyword)) add(alias);
+    if (!isMultiTermPhrase) {
+      for (const alias of this.buildLatinKeywordAliases(keyword)) add(alias);
+    }
     return sets;
   }
 
@@ -790,14 +882,22 @@ export class SearchService {
     const seen = new Set<string>();
     const compact = this.compactForSearch(keyword);
     const coreKeyword = this.stripMediaIntentTerms(keyword);
+    const meaningfulTerms = this.meaningfulKeywordTerms(keyword);
+    const isMultiTermPhrase = meaningfulTerms.length >= 3;
     const baseQueries = [
       keyword,
       coreKeyword && coreKeyword !== this.normalizeForSearch(keyword).replace(/\s+/g, ' ') ? coreKeyword : '',
       compact && compact !== this.normalizeForSearch(keyword).replace(/\s+/g, '') ? compact : ''
     ].filter(Boolean);
-    const latinAliases = this.buildLatinKeywordAliases(keyword);
+    const latinAliases = isMultiTermPhrase ? [] : this.buildLatinKeywordAliases(keyword);
 
     for (const query of baseQueries) this.addKeywordQuery(out, seen, query);
+    if (isMultiTermPhrase) {
+      for (const query of this.buildFocusedPhraseSeedQueries(meaningfulTerms)) {
+        this.addKeywordQuery(out, seen, query);
+        for (const aliasQuery of this.buildAliasSeedQueries(query)) this.addKeywordQuery(out, seen, aliasQuery);
+      }
+    }
     for (const alias of latinAliases) this.addKeywordQuery(out, seen, alias);
     for (const alias of latinAliases) {
       this.addKeywordQuery(out, seen, `free ${alias}`);

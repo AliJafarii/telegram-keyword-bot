@@ -37,6 +37,7 @@ export default () => ({
   apiHash: process.env.API_HASH || '',
   sessionString: process.env.SESSION_STRING || '',
   logLevel: process.env.LOG_LEVEL || 'info',
+  botHandlerTimeoutMs: Number(process.env.BOT_HANDLER_TIMEOUT_MS || 3600000),
   webPageSize: Number(process.env.WEB_PAGE_SIZE || 10),
   tgPageSize: Number(process.env.TG_PAGE_SIZE || 5),
   webPageLimit: Number(process.env.WEB_PAGE_LIMIT || 10),
